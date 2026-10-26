@@ -1,0 +1,244 @@
+/* Südtirol Radar 5.7 — Abfahrts-Ansicht (Core-Design konsistent)
+   Alle Farben stammen aus styles.css. Keine Cyan/Türkis-Flächen. */
+
+body:has(.sr57-view:not(.sr57-hidden)){background:var(--color-bg)}
+.sr57-view{
+  position:relative;min-height:100dvh;overflow-y:auto;overscroll-behavior:contain;
+  background:var(--color-bg);color:var(--color-text);
+  padding:calc(env(safe-area-inset-top) + 10px) 12px calc(100px + env(safe-area-inset-bottom));
+  font-family:Inter,system-ui,-apple-system,Arial,sans-serif;
+}
+.sr57-view.sr57-hidden{display:none!important}
+.sr57-header,.sr57-boardinfo,.sr57-row,.sr57-metrics,.sr57-schedule{
+  display:flex;justify-content:space-between;align-items:center
+}
+.sr57-header{margin:0 2px 18px}
+.sr57-brand{
+  display:flex;align-items:center;gap:6px;
+  font-size:16px;font-weight:800;letter-spacing:.1em;color:var(--color-text)
+}
+.sr57-version{color:var(--color-text-muted);font-size:11px}
+.sr57-live{
+  font-size:8px;letter-spacing:.03em;color:var(--color-good)
+}
+.sr57-stationbox{
+  background:var(--color-surface-2);border:1px solid var(--color-edge);
+  border-radius:var(--radius-md);padding:12px 14px;margin-bottom:10px
+}
+.sr57-caption,.sr57-kicker{
+  font-size:9px;letter-spacing:.12em;color:var(--color-text-muted);font-weight:700
+}
+.sr57-station{
+  width:100%;border:0;background:transparent;color:var(--color-text);
+  text-align:center;font-size:18px;font-weight:700;padding:7px 0 2px;cursor:pointer
+}
+.sr57-filters{
+  display:flex;gap:6px;margin:8px 0 12px
+}
+.sr57-filter{
+  flex:1;border:1px solid var(--color-edge);
+  background:var(--color-surface-2);border-radius:var(--radius-md);
+  padding:8px;color:var(--color-text-muted);font-weight:600
+}
+.sr57-filter[aria-pressed=true]{
+  background:var(--color-surface);color:var(--color-text);
+  border-color:var(--color-train)
+}
+.sr57-picker{
+  background:var(--color-surface-2);border:1px solid var(--color-edge);
+  border-radius:var(--radius-md);padding:10px;margin-bottom:12px
+}
+.sr57-picker[hidden]{display:none}
+.sr57-search{
+  width:100%;background:var(--color-bg);color:var(--color-text);
+  border:1px solid var(--color-edge);border-radius:var(--radius-sm);
+  font-size:15px;padding:10px
+}
+.sr57-options{max-height:34dvh;overflow:auto}
+.sr57-option{
+  display:block;width:100%;text-align:left;border:0;
+  border-bottom:1px solid var(--color-edge);background:transparent;
+  color:var(--color-text);padding:10px;font-size:12px
+}
+.sr57-boardinfo{
+  font-size:9px;color:var(--color-text-muted);font-weight:700;
+  letter-spacing:.07em;margin:0 2px 8px
+}
+.sr57-board{display:flex;flex-direction:column;gap:4px}
+.sr57-row{
+  width:100%;gap:10px;text-align:left;
+  border:1px solid var(--color-edge);background:var(--color-surface-2);
+  color:var(--color-text);border-radius:var(--radius-md);
+  padding:9px 11px;min-height:56px;cursor:pointer;
+  border-left:3px solid var(--color-train)
+}
+.sr57-row:active{background:rgba(91,143,249,.06)}
+.sr57-time{width:56px;flex:none}
+.sr57-time strong{
+  font-size:19px;font-weight:750;letter-spacing:-.035em;
+  font-variant-numeric:tabular-nums;color:var(--color-text)
+}
+.sr57-time small{
+  font-size:8px;letter-spacing:.02em;color:var(--color-text-muted);
+  display:block;margin-top:3px
+}
+.sr57-route{flex:1;min-width:0}
+.sr57-route strong{
+  display:block;font-size:12px;font-weight:800;line-height:1.2;
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  color:var(--color-text)
+}
+.sr57-route small,.sr57-delay small{
+  display:block;color:var(--color-text-muted);font-size:9px;margin-top:3px
+}
+.sr57-route-destination{
+  display:block;color:var(--color-text-muted);font-size:11px;
+  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-top:3px
+}
+.sr57-delay{text-align:right;flex:none}
+.sr57-delay strong{
+  font-size:15px;font-variant-numeric:tabular-nums;color:var(--color-good)
+}
+.sr57-delay strong.sr57-late{color:var(--color-warn)}
+.sr57-delay strong.sr57-bad{color:var(--color-delay)}
+.sr57-empty{
+  padding:20px 8px;color:var(--color-text-muted);
+  text-align:center;background:var(--color-surface-2);border-radius:var(--radius-md)
+}
+.sr57-dialog{
+  border:1px solid var(--color-edge);border-radius:var(--radius-lg);
+  background:var(--color-surface-2);color:var(--color-text);
+  width:min(92vw,440px);max-height:83dvh;overflow:auto;padding:20px;
+  box-shadow:var(--color-shadow)
+}
+.sr57-dialog::backdrop{
+  background:rgba(0,6,15,.3);backdrop-filter:blur(6px)
+}
+.sr57-dialog-head{
+  display:flex;justify-content:space-between;align-items:center
+}
+.sr57-close{
+  background:var(--color-surface-2);border:0;
+  border-radius:var(--radius-sm);color:var(--color-text);
+  padding:7px 10px
+}
+.sr57-title{font-size:26px;margin:14px 0 0;color:var(--color-text)}
+.sr57-destination{color:var(--color-text-muted);margin:2px 0 16px}
+.sr57-metrics{gap:8px}
+.sr57-metric{
+  flex:1;background:var(--color-surface-2);
+  border-radius:var(--radius-md);padding:12px
+}
+.sr57-metric small{display:block;color:var(--color-text-muted);font-size:9px}
+.sr57-metric strong{
+  display:block;font-size:21px;margin-top:4px;color:var(--color-text)
+}
+.sr57-explain{
+  font-size:12px;line-height:1.5;color:var(--color-text-muted)
+}
+.sr57-schedule{
+  font-size:11px;color:var(--color-text-muted);gap:10px;
+  padding:12px 0;border-top:1px solid var(--color-edge);
+  border-bottom:1px solid var(--color-edge)
+}
+.sr57-dialog h3{
+  font-size:14px;margin:20px 0 7px;color:var(--color-text)
+}
+.sr57-count{font-size:10px;color:var(--color-text-muted)}
+.sr57-primary{
+  background:var(--color-train);border:0;
+  border-radius:var(--radius-md);padding:13px;
+  color:#fff;font-weight:700;width:100%;margin-top:11px
+}
+
+#sr50DeparturesView:has(.sr57-view) > :not(.sr57-view){display:none!important}
+
+.sr57-history-chart{
+  display:flex;align-items:end;justify-content:space-between;gap:7px;
+  border:1px solid var(--color-edge);background:var(--color-surface-2);
+  border-radius:var(--radius-md);padding:13px 8px 9px;margin-top:10px
+}
+.sr57-history-day{
+  min-width:0;flex:1;display:flex;flex-direction:column;
+  align-items:center;justify-content:end;gap:4px;
+  color:var(--color-text-muted);font-size:9px
+}
+.sr57-history-bar{
+  width:70%;background:var(--color-train);
+  border-radius:5px 5px 2px 2px;min-height:7px
+}
+.sr57-history-missing{background:var(--color-surface)}
+.sr57-history-day small{font-size:9px;color:var(--color-text-muted)}
+#sr50DeparturesView:has(.sr57-view){background:var(--color-bg)!important}
+
+.sr57-position{
+  background:var(--color-surface-2);border:1px solid var(--color-edge);
+  border-radius:var(--radius-md);padding:14px 12px;margin-top:10px
+}
+.sr57-position-endpoints{
+  font-size:10px;color:var(--color-text-muted);
+  text-align:center;margin-bottom:14px
+}
+.sr57-position-track{
+  position:relative;height:3.5px;border-radius:5px;
+  background:linear-gradient(90deg,var(--color-train),var(--color-text-muted));
+  margin:14px 16px 17px
+}
+.sr57-position-pin{
+  position:absolute;top:50%;transform:translate(-50%,-50%);
+  font-size:20px;line-height:1
+}
+.sr57-position-observed{color:var(--color-train)}
+.sr57-position-planned{color:var(--color-warn)}
+.sr57-position-legend{
+  display:flex;justify-content:space-between;
+  font-size:10px;color:var(--color-text-muted)
+}
+.sr57-position-distance{
+  display:block;font-size:14px;color:var(--color-text);
+  text-align:center;margin-top:16px
+}
+.sr57-position-info{
+  margin-top:10px;border-top:1px solid var(--color-edge);
+  padding-top:9px
+}
+.sr57-position-info summary{
+  font-size:10px;color:var(--color-text-muted);cursor:pointer
+}
+
+.sr57-board{gap:4px}
+.sr57-row{min-height:56px;padding:9px 11px;gap:10px;border-left:3px solid var(--color-train)}
+.sr57-row:has(.sr57-time small){align-items:center}
+.sr57-time{width:56px}
+.sr57-time strong{font-size:19px;font-weight:750;letter-spacing:-.035em}
+.sr57-time small{font-size:8px;letter-spacing:.02em}
+.sr57-route-number{font-size:12px;font-weight:800;display:block;line-height:1.2}
+.sr57-route-destination{
+  display:block;color:var(--color-text-muted);
+  font-size:11px;overflow:hidden;white-space:nowrap;
+  text-overflow:ellipsis;margin-top:3px
+}
+.sr57-delay strong{font-size:15px;font-variant-numeric:tabular-nums}
+.sr57-delay small{font-size:8px}
+.sr57-vehicle-type{
+  font-size:11px;color:var(--color-text-muted);
+  background:var(--color-surface);border-radius:var(--radius-sm);
+  padding:10px 11px;margin:10px 0
+}
+.sr57-filters{margin:8px 0 12px}
+
+@media(max-width:365px){
+  .sr57-view{
+    padding:calc(env(safe-area-inset-top) + 9px) 10px calc(94px + env(safe-area-inset-bottom))
+  }
+  .sr57-header{margin:0 2px 14px}
+  .sr57-stationbox{padding:11px 13px}
+  .sr57-filters{gap:5px;margin:6px 0 10px}
+  .sr57-filter{padding:7px;font-size:9px}
+  .sr57-row{padding:8px 10px;min-height:50px}
+  .sr57-time{width:48px}
+  .sr57-time strong{font-size:17px}
+  .sr57-delay strong{font-size:14px}
+  .sr57-route strong{font-size:11px}
+  .sr57-vehicle-type{padding:8px 10px;margin:8px 0}
+}

@@ -1,0 +1,538 @@
+/* Südtirol Radar — Design System 10.0
+   Graphit/Silber-Palette: nahezu schwarzes Graphit, dunkle Schiefer-Oberflächen,
+   helles Silber für Haupttext, kühles Grau für Sekundärtext.
+   Keine Cyan-/Türkis-Flächen, keine Leuchteffekte, keine Gradiente in der UI.
+   Fahrzeugfarbe (Züge Blau, Busse Orange) bleibt semantisch erhalten. */
+
+/* === Farbtokens (Dark Theme) === */
+:root {
+  --color-bg: #0a0f14;
+  --color-surface: #141e26;
+  --color-surface-2: #1c2936;
+  --color-surface-3: #263340;
+  --color-text: #e8edf2;
+  --color-text-2: #aebbc7;
+  --color-text-muted: #7a8a96;
+  --color-edge: #2a3a46;
+  --color-edge-strong: #3a4a5a;
+  --color-shadow: 0 18px 50px rgba(0,0,0,.5);
+
+  --color-train: #5b8ff9;
+  --color-train-dim: #3d6ad9;
+  --color-bus: #e08a4d;
+  --color-bus-dim: #c97535;
+  --color-delay: #c94f4f;
+  --color-delay-dim: #a33e3e;
+  --color-good: #6fb08a;
+  --color-good-dim: #559072;
+  --color-warn: #d9a04d;
+  --color-unknown: #7a8a96;
+
+  --color-focus: #7a9be0;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+  --touch: 44px;
+  --ease: cubic-bezier(.2, 0, .35, 1);
+}
+
+/* === Farbtokens (Light Theme) === */
+:root[data-theme=light] {
+  --color-bg: #f2f5f8;
+  --color-surface: #ffffff;
+  --color-surface-2: #eef2f6;
+  --color-surface-3: #dee5ec;
+  --color-text: #14212d;
+  --color-text-2: #4a5d6c;
+  --color-text-muted: #7a8a96;
+  --color-edge: #c9d4de;
+  --color-edge-strong: #b9c6d0;
+  --color-shadow: 0 18px 50px rgba(20,33,45,.12);
+
+  --color-train: #3a6fd6;
+  --color-train-dim: #2a59b8;
+  --color-bus: #d97b3c;
+  --color-bus-dim: #c0662a;
+  --color-delay: #b34040;
+  --color-delay-dim: #9a3333;
+  --color-good: #4e8c6b;
+  --color-good-dim: #3a7255;
+  --color-warn: #c2822e;
+  --color-unknown: #7a8a96;
+
+  --color-focus: #3a6fd6;
+}
+
+/* === Reset & Base === */
+*,*:before,*:after{box-sizing:border-box}
+html,body{margin:0;height:100%;width:100%;overflow:hidden}
+body{
+  font-family:Inter,system-ui,-apple-system,Arial,sans-serif;
+  color:var(--color-text);
+  background:var(--color-bg);
+  -webkit-tap-highlight-color:transparent;
+  line-height:1.5;
+}
+button,input{font:inherit}
+button{cursor:pointer;color:inherit;background:none;border:0}
+button:focus-visible,input:focus-visible{outline:2px solid var(--color-focus);outline-offset:2px}
+#map{position:absolute;inset:0;background:var(--color-bg);z-index:1}
+.leaflet-container{background:var(--color-bg)!important}
+.leaflet-control-attribution{font-size:9px!important;opacity:.7}
+.leaflet-control-attribution a{color:var(--color-train)!important}
+
+/* === Topbar – kompakt, eine Zeile === */
+.topbar{
+  position:absolute;z-index:950;top:0;left:0;right:0;
+  padding:calc(10px + env(safe-area-inset-top)) 12px 10px;
+  background:rgba(10,15,20,.82);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  border-bottom:1px solid var(--color-edge);
+}
+.toprow{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.brand-badge{
+  width:36px;height:36px;display:grid;place-items:center;
+  border-radius:10px;background:var(--color-surface-2);
+  border:1px solid var(--color-edge);color:var(--color-text);font-size:18px;
+}
+.brand{min-width:0;flex:1}
+.brand-title{font-size:16px;letter-spacing:-.4px;font-weight:800;line-height:1.1}
+.brand-title em{font-size:10px;font-style:normal;color:var(--color-train);margin-left:4px;font-weight:700;vertical-align:middle}
+.brand-sub{font-size:9px;color:var(--color-text-muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.status{
+  border-radius:var(--radius-pill);
+  background:var(--color-surface-2);
+  border:1px solid var(--color-edge);
+  display:flex;gap:5px;align-items:center;
+  font-size:9px;font-weight:700;letter-spacing:.03em;
+  padding:6px 8px;flex-shrink:0;
+}
+.status-dot{
+  width:6px;height:6px;background:var(--color-warn);
+  border-radius:50%;box-shadow:0 0 0 2px rgba(217,160,77,.15);
+}
+.status.ok .status-dot{background:var(--color-good);box-shadow:0 0 0 2px rgba(111,176,138,.15)}
+.status.error .status-dot{background:var(--color-delay);box-shadow:0 0 0 2px rgba(201,79,79,.15)}
+
+.iconbtn{
+  width:var(--touch);height:var(--touch);
+  display:grid;place-items:center;
+  border:1px solid var(--color-edge);
+  border-radius:var(--radius-md);
+  background:var(--color-surface-2);
+  font-size:16px;flex-shrink:0;
+}
+
+/* === Controls / Filter / Suche === */
+.controls{display:flex;gap:5px;margin-top:10px;align-items:center;min-width:0}
+.segments{display:flex;flex-shrink:0;gap:4px}
+.chip{
+  font-size:10px;font-weight:600;padding:7px 10px;white-space:nowrap;
+  border:1px solid var(--color-edge);background:rgba(255,255,255,.02);
+  border-radius:var(--radius-md);color:var(--color-text-2);
+}
+.chip.active{
+  background:var(--color-surface-3);border-color:var(--color-train);color:var(--color-text);
+}
+.chip.active em,.chip.active span{color:inherit}
+
+/* Emoji-Icons in Chips durch Text ersetzen (CSS kann das nicht, wird in app.js getan) */
+.search-wrap{
+  display:flex;align-items:center;flex:1;min-width:70px;gap:4px;
+  border:1px solid var(--color-edge);background:var(--color-surface-2);
+  border-radius:var(--radius-pill);padding:0 10px;height:36px;
+}
+.search-wrap span{font-size:11px;opacity:.5}
+.search-wrap input{
+  border:0;outline:0;background:none;color:var(--color-text);
+  width:100%;min-width:0;font-size:12px;
+}
+.search-wrap input::placeholder{color:var(--color-text-muted)}
+
+/* === Banners & Info === */
+.info-banner{
+  position:absolute;z-index:900;top:calc(110px + env(safe-area-inset-top));
+  left:12px;max-width:min(375px,calc(100vw - 24px));
+  background:rgba(10,15,20,.85);padding:8px 11px;border:1px solid var(--color-edge);
+  backdrop-filter:blur(12px);border-radius:var(--radius-md);
+  font-size:11px;color:var(--color-text-2);box-shadow:var(--color-shadow);
+}
+.info-banner strong{color:var(--color-text)}
+.info-banner[hidden]{display:none}
+.info-close{background:none;border:0;font-size:14px;float:right;padding:0 0 2px 8px;color:var(--color-text-muted)}
+
+.map-actions{
+  position:absolute;right:12px;bottom:calc(82px + env(safe-area-inset-bottom));
+  z-index:850;display:flex;flex-direction:column;gap:6px;
+}
+.round-action{
+  width:var(--touch);height:var(--touch);
+  display:grid;place-items:center;
+  border-radius:var(--radius-md);
+  border:1px solid var(--color-edge);
+  background:rgba(10,15,20,.8);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  box-shadow:var(--color-shadow);font-size:16px;
+}
+.round-action:active{background:var(--color-surface-2)}
+
+/* === Stats Footer – kompakt === */
+.stats{
+  position:absolute;z-index:850;bottom:calc(12px + env(safe-area-inset-bottom));
+  left:12px;right:12px;
+  border-radius:var(--radius-lg);
+  border:1px solid var(--color-edge);
+  background:rgba(10,15,20,.8);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  padding:10px 12px;display:flex;align-items:center;
+  justify-content:space-between;gap:6px;box-shadow:var(--color-shadow);
+}
+.stats-counts{display:flex;align-items:center;gap:clamp(6px,2vw,12px)}
+.stat{display:flex;gap:4px;align-items:baseline;white-space:nowrap}
+.stat b{font-size:15px;font-variant-numeric:tabular-nums;letter-spacing:-.3px;color:var(--color-text)}
+.stat span{font-size:9px;color:var(--color-text-muted)}
+.stats-time{font-size:9px;color:var(--color-text-muted);text-align:right;white-space:nowrap}
+
+/* === Markers – keine Cyan/Türkis === */
+.marker-wrap{
+  position:relative;display:flex;flex-direction:column;
+  align-items:center;justify-content:flex-end;
+  width:30px;height:43px;pointer-events:none;
+}
+.marker-circle{
+  pointer-events:auto;width:26px;height:26px;
+  border:2px solid #fff;border-radius:50%;
+  display:grid;place-items:center;
+  background:linear-gradient(150deg,var(--color-train),var(--color-train-dim));
+  box-shadow:0 2px 8px rgba(0,27,59,.5);font-size:11px;color:white;
+}
+.marker-wrap.bus .marker-circle{
+  width:18px;height:18px;
+  background:linear-gradient(160deg,var(--color-bus),var(--color-bus-dim));
+  font-size:9px;box-shadow:0 2px 7px rgba(69,43,0,.5);
+}
+.marker-label{
+  display:block;position:absolute;top:-4px;left:50%;
+  transform:translate(-50%,-100%);
+  white-space:nowrap;max-width:100px;text-overflow:ellipsis;overflow:hidden;
+  background:rgba(12,26,47,.92);color:#fff;
+  border:1px solid rgba(255,255,255,.25);border-radius:5px;
+  padding:2px 5px;font-size:9px;font-weight:700;
+  box-shadow:0 1px 4px rgba(0,0,0,.3);pointer-events:none;
+}
+.marker-wrap.unverified .marker-label{display:none}
+.marker-wrap.selected .marker-circle{
+  box-shadow:0 0 0 4px rgba(91,143,249,.35),0 3px 12px rgba(6,26,60,.45);
+}
+.marker-wrap.bus.selected .marker-circle{
+  box-shadow:0 0 0 4px rgba(224,138,77,.35),0 3px 12px rgba(68,48,0,.45);
+}
+
+/* === Sheets === */
+.scrim{
+  position:absolute;inset:0;z-index:1100;
+  background:rgba(0,6,15,.3);opacity:0;pointer-events:none;
+  transition:opacity .2s;
+}
+.scrim.show{opacity:1;pointer-events:auto}
+.sheet{
+  position:fixed;z-index:1200;bottom:0;left:0;right:0;
+  background:var(--color-surface);
+  border:1px solid var(--color-edge);border-bottom:0;
+  border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+  box-shadow:var(--color-shadow);
+  padding:10px 16px calc(20px + env(safe-area-inset-bottom));
+  max-height:min(80dvh,720px);overflow:auto;
+  transform:translateY(105%);
+  transition:transform .24s var(--ease);
+}
+.sheet.open{transform:translateY(0)}
+.handle{
+  width:34px;height:3.5px;border-radius:2px;
+  background:#8092a8;opacity:.6;margin:1px auto 15px;
+}
+.sheet-heading{
+  display:flex;gap:10px;align-items:flex-start;margin-bottom:4px;
+}
+.sheet-heading-main{flex:1;min-width:0}
+.eyebrow{
+  color:var(--color-train);font-weight:800;font-size:9px;
+  letter-spacing:.08em;text-transform:uppercase;
+}
+.sheet-title{
+  font-weight:800;letter-spacing:-.5px;font-size:21px;
+  margin:2px 0;color:var(--color-text);
+}
+.sheet-subtitle{font-size:12px;color:var(--color-text-muted);line-height:1.4}
+.close{
+  width:38px;height:38px;border-radius:50%;
+  background:var(--color-surface-2);font-size:14px;
+  color:var(--color-text);
+}
+.close:active{background:var(--color-surface-3)}
+.badge-row{display:flex;gap:5px;flex-wrap:wrap;margin:10px 0}
+.mini-badge{
+  padding:4px 7px;border-radius:6px;
+  background:var(--color-surface-2);
+  border:1px solid var(--color-edge);
+  font-size:9px;font-weight:700;
+}
+.mini-badge.ok{color:var(--color-good)}
+.mini-badge.warn{color:var(--color-warn)}
+.mini-badge.bad{color:var(--color-delay)}
+
+/* === Model Card & Details === */
+.model-card{
+  border:1px solid var(--color-edge);
+  border-radius:var(--radius-md);overflow:hidden;
+  margin:11px 0;background:var(--color-surface-2);
+}
+.model-card img{width:100%;height:140px;object-fit:cover;background:var(--color-bg)}
+.model-text{padding:9px 11px}
+.model-text strong{font-size:12px;color:var(--color-text)}
+.model-text small{display:block;color:var(--color-text-muted);margin-top:3px;font-size:10px;line-height:1.4}
+.note{
+  font-size:10px;color:var(--color-text-muted);
+  background:var(--color-surface-2);border-radius:var(--radius-sm);
+  padding:10px 11px;line-height:1.5;margin:11px 0;
+}
+.details{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:7px;margin:11px 0;
+}
+.detail{
+  background:var(--color-surface-2);
+  padding:9px;border:1px solid var(--color-edge);
+  border-radius:var(--radius-sm);min-width:0;
+}
+.detail small{display:block;color:var(--color-text-muted);font-size:9px}
+.detail strong{display:block;margin-top:3px;font-size:11px;overflow-wrap:anywhere;font-weight:700;color:var(--color-text)}
+
+/* === Lists & Sections === */
+.section-title{
+  display:flex;justify-content:space-between;align-items:center;
+  gap:8px;font-weight:800;font-size:12px;margin:17px 0 9px;
+  color:var(--color-text);
+}
+.section-sub{font-size:10px;color:var(--color-text-muted);font-weight:500}
+.stop-list{list-style:none;padding:0;margin:0;border-left:2px solid var(--color-edge);margin-left:6px}
+.stop{
+  position:relative;padding:0 0 13px 18px;
+  display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px;
+  font-size:11px;
+}
+.stop:last-child{padding-bottom:0}
+.stop:before{
+  content:'';position:absolute;top:2px;left:-6px;
+  width:8px;height:8px;background:var(--color-surface);
+  border:2px solid var(--color-train);border-radius:50%;
+}
+.stop:first-child:before,.stop:last-child:before{background:var(--color-train)}
+.stop b{font-size:11px;color:var(--color-text)}
+.stop small{font-size:9px;color:var(--color-text-muted);display:block;margin-top:2px}
+.stop-time{font-weight:700;font-variant-numeric:tabular-nums}
+.empty{
+  font-size:11px;color:var(--color-text-muted);
+  line-height:1.6;padding:13px;
+  background:var(--color-surface-2);border-radius:var(--radius-md);
+}
+
+/* === Station Results === */
+.station-results{display:grid;gap:6px;max-height:45dvh;overflow:auto}
+.station-result{
+  border:1px solid var(--color-edge);
+  border-radius:var(--radius-md);
+  padding:11px;background:var(--color-surface-2);
+  display:flex;justify-content:space-between;text-align:left;gap:7px;
+}
+.station-result:active{transform:scale(.985)}
+.station-result strong{display:block;font-size:11px;color:var(--color-text)}
+.station-result small{font-size:9px;color:var(--color-text-muted)}
+.station-result span{font-size:11px;color:var(--color-train)}
+
+/* === Schedule Matches === */
+.schedule-matches{
+  position:absolute;z-index:1005;
+  top:calc(102px + env(safe-area-inset-top));left:12px;right:12px;
+  max-height:32dvh;overflow:auto;
+  background:var(--color-surface);
+  border:1px solid var(--color-edge);
+  border-radius:var(--radius-md);padding:9px;
+  box-shadow:var(--color-shadow);
+}
+.schedule-matches[hidden]{display:none}
+.schedule-matches h3{font-size:10px;color:var(--color-text-muted);margin:3px 7px 7px}
+.schedule-matches button{
+  display:flex;justify-content:space-between;align-items:center;
+  width:100%;border:1px solid var(--color-edge);
+  border-radius:10px;background:var(--color-surface-2);
+  padding:9px 10px;text-align:left;margin-bottom:5px;
+}
+.schedule-matches button:last-child{margin-bottom:0}
+.schedule-matches strong{font-size:11px;color:var(--color-text)}
+.schedule-matches small{display:block;color:var(--color-text-muted);font-size:9px;margin-top:1px}
+
+/* === Touch feedback === */
+button{-webkit-tap-highlight-color:transparent}
+button:active{transform:scale(.975)}
+.sheet button:active{transform:scale(.985)}
+.station-result:active{transform:scale(.985)}
+
+/* === Media Queries === */
+@media(min-width:750px){
+  .topbar{left:16px;right:auto;top:16px;width:520px;
+    border:1px solid var(--color-edge);border-radius:var(--radius-lg);
+    padding:13px}
+  .info-banner{top:152px;left:16px}
+  .sheet{left:auto;width:430px;border-radius:var(--radius-lg) 0 0;max-height:90dvh}
+  .stats{left:16px;right:auto;width:460px}
+  .map-actions{right:24px}
+  .schedule-matches{top:130px;left:16px;right:auto;width:520px}
+}
+@media(max-width:365px){
+  .brand-title{font-size:14px}
+  .brand-sub{font-size:8px}
+  .chip{padding:7px 8px;font-size:9px}
+  .status{font-size:8px;padding:5px 7px}
+  .stats-counts{gap:6px}
+  .stats{padding:9px}
+  .stat span{font-size:8px}
+  .iconbtn{width:36px;height:36px}
+  .round-action{width:36px;height:36px}
+}
+@media(prefers-reduced-motion:reduce){
+  .sheet,.scrim{transition:none}
+  button:active{transform:none}
+  .station-result:active{transform:none}
+}
+
+/* === Leaflet Layout Safety Net === */
+html,body{height:100dvh;max-height:100dvh;overscroll-behavior:none;-webkit-overflow-scrolling:auto}
+body{position:fixed;inset:0;overflow:hidden}
+html[data-theme="dark"] .leaflet-tile-pane,
+html[data-theme="light"] .leaflet-tile-pane,
+.leaflet-tile-pane,.leaflet-tile{filter:none!important;-webkit-filter:none!important}
+.leaflet-tile{image-rendering:auto}
+#map{width:100vw;height:100dvh;min-height:100%;overflow:hidden}
+.sheet{
+  position:fixed;display:flex;flex-direction:column;overflow:hidden;
+  max-height:min(85dvh,800px);overscroll-behavior-y:contain;
+  touch-action:pan-y;
+  padding-bottom:calc(12px + env(safe-area-inset-bottom));
+}
+.sheet-heading{flex-shrink:0}
+.handle{flex-shrink:0}
+.sheet-scroll{
+  display:block;flex:1 1 auto;min-height:0;
+  max-height:calc(75dvh - 75px);overflow-x:hidden;overflow-y:auto;
+  overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+  touch-action:pan-y;padding:0 2px 12px 0;
+  scrollbar-width:thin;
+}
+.sheet-scroll:focus-visible{outline:2px solid var(--color-focus);outline-offset:-2px}
+#stationSheet{height:min(83dvh,740px)}
+#stationSheet .sheet-scroll{max-height:none}
+.station-results{max-height:none;overflow:visible;display:grid}
+.station-results[hidden],.station-board[hidden]{display:none!important}
+#stationBoard[hidden],#stationResults[hidden]{display:none!important}
+@media(max-width:749px){
+  .sheet{max-height:calc(100dvh - env(safe-area-inset-top) - 22px)}
+  #stationSheet{height:min(83dvh,740px)}
+  #stationSheet .sheet-scroll{padding-bottom:calc(18px + env(safe-area-inset-bottom))}
+}
+@media(min-width:750px){
+  #stationSheet{height:min(88dvh,780px)}
+  .sheet-scroll{max-height:calc(80dvh - 75px)}
+}
+
+/* Leaflet panes */
+#map.leaflet-container{position:absolute;overflow:hidden;outline:0}
+#map .leaflet-map-pane,#map .leaflet-pane,#map .leaflet-layer,
+#map .leaflet-tile-container,#map .leaflet-tile,#map .leaflet-marker-icon,
+#map .leaflet-marker-shadow,#map .leaflet-image-layer,
+#map .leaflet-pane > svg,#map .leaflet-pane > canvas,#map .leaflet-zoom-box{
+  position:absolute;left:0;top:0;
+}
+#map .leaflet-pane{z-index:400}
+#map .leaflet-tile-pane{z-index:200}
+#map .leaflet-overlay-pane{z-index:400}
+#map .leaflet-shadow-pane{z-index:500}
+#map .leaflet-marker-pane{z-index:650}
+#map .leaflet-tooltip-pane{z-index:680}
+#map .leaflet-popup-pane{z-index:700}
+#map .leaflet-tile-container{pointer-events:none}
+#map img.leaflet-tile{
+  display:block;margin:0;border:0;max-width:none!important;max-height:none!important;
+  -webkit-filter:none!important;filter:none!important;
+}
+#map .leaflet-marker-icon{display:block;max-width:none!important;max-height:none!important;}
+#map .leaflet-marker-icon.leaflet-interactive{pointer-events:auto;}
+#map .leaflet-zoom-animated{transform-origin:0 0}
+#map .leaflet-zoom-hide{visibility:hidden}
+#map .leaflet-top,#map .leaflet-bottom{
+  position:absolute;z-index:1000;pointer-events:none;
+}
+#map .leaflet-top{top:0}
+#map .leaflet-bottom{bottom:0}
+#map .leaflet-left{left:0}
+#map .leaflet-right{right:0}
+#map .leaflet-control{
+  position:relative;z-index:800;pointer-events:auto;clear:both;
+}
+#map .leaflet-left .leaflet-control{float:left}
+#map .leaflet-right .leaflet-control{float:right}
+#map .leaflet-bottom .leaflet-control{margin-bottom:10px}
+#map .leaflet-control-attribution{
+  background:rgba(255,255,255,.85);color:#14212d;
+  padding:0 5px;border-radius:4px;
+}
+#map .leaflet-control-zoom a{
+  display:block;width:27px;height:27px;line-height:27px;
+  text-align:center;background:#fff;color:#14212d;
+  text-decoration:none;border-radius:4px;
+}
+#map .leaflet-marker-pane .radar-custom{visibility:visible;pointer-events:auto}
+#map .leaflet-marker-pane .marker-wrap{overflow:visible}
+
+/* Map tile filter for dark theme */
+html[data-theme="dark"] #map img.leaflet-tile{
+  -webkit-filter:invert(1) hue-rotate(180deg) brightness(.78) contrast(.92) saturate(.72)!important;
+  filter:invert(1) hue-rotate(180deg) brightness(.78) contrast(.92) saturate(.72)!important;
+}
+html[data-theme="light"] #map img.leaflet-tile{
+  -webkit-filter:none!important;filter:none!important;
+}
+
+/* === Backward-compatible aliases for legacy CSS files === */
+:root{
+  --bg: var(--color-bg);
+  --glass: rgba(10,15,20,.82);
+  --panel: var(--color-surface);
+  --panel2: var(--color-surface-2);
+  --text: var(--color-text);
+  --muted: var(--color-text-muted);
+  --edge: var(--color-edge);
+  --blue: var(--color-train);
+  --orange: var(--color-bus);
+  --good: var(--color-good);
+  --bad: var(--color-delay);
+  --warn: var(--color-warn);
+  --shadow: var(--color-shadow);
+}
+:root[data-theme=light]{
+  --bg: var(--color-bg);
+  --glass: rgba(255,255,255,.92);
+  --panel: var(--color-surface);
+  --panel2: var(--color-surface-2);
+  --text: var(--color-text);
+  --muted: var(--color-text-muted);
+  --edge: var(--color-edge);
+  --blue: var(--color-train);
+  --orange: var(--color-bus);
+  --good: var(--color-good);
+  --bad: var(--color-delay);
+  --warn: var(--color-warn);
+  --shadow: var(--color-shadow);
+}

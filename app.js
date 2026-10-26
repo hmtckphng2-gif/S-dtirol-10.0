@@ -1,0 +1,1524 @@
+import {state,bootPhase,loadFavorites,saveFavorites,toggleFavorite,isFavorite,loadLineFavorites,saveLineFavorites,toggleLineFavorite,isLineFavorite,loadJourneyFavorites,saveJourneyFavorites,toggleJourneyFavorite,isJourneyFavorite,loadStationFavorites,saveStationFavorites,toggleStationFavorite,isStationFavorite,addTrackPoint,getTrackPoints,clearTrack,loadDismissedAlerts,saveDismissedAlerts,dismissAlert} from './app-state.js?v=9.9.0';
+import {motionDuration,platformInfo} from './radar54-logic.mjs?v=9.9.0';
+import {boundedMotionDuration,feedDiagnostics} from './radar66-logic.mjs?v=9.9.0';
+import {selectRepresentatives,observationQuality} from './radar64-logic.mjs?v=9.9.0';
+import {collectTrafficIssues,networkOverview,delayDistribution} from './radar58-logic.mjs?v=9.9.0';
+import {enrichTrainPlatform} from './train-platforms.js?v=9.9.0';
+import {
+  SOURCES, UPDATE_SOURCES, BBOX, txt, gtfsNumber, parseVehicles, parseUpdates, formatDelay,
+  feedAgeSeconds, shapeProject, pointAtDistance, routeOnlySnap, stopRows, formatClock, delayForVehicle,
+  vehicleDelayInfo, bufferedAlong, departureDelay, isLiveUpdate, normalizeStopId
+} from './core.js?v=9.9.0';
+import {playbackLag} from './radar45-logic.mjs?v=9.9.0';
+import {trainReplayDuration} from './radar705-motion.mjs?v=9.9.0';
+import {deriveCandidates,withinShapeBounds,chooseVerifiedCandidate} from './radar451-logic.mjs?v=9.9.0';
+import {trainScheduledPosition} from './radar51-logic.mjs?v=9.9.0';
+import {buildJourney,TRUST,FORECAST_QUALITY,formatJourneyDelay,journeyFavoriteStatus} from './radar57-journey.mjs?v=9.9.0';
+import {buildFeedStatus, processPositionFeed, mergePositionVehicles, pruneStaleVehicles, processUpdates, parseAlerts} from './feed-process.mjs?v=9.9.0';
+import {t, setLocale, getLocale, initLocale} from './translations.mjs?v=9.9.0';
+
+const $ = id => document.getElementById(id);
+const DIRECT_POSITION_SOURCES=['sta_direct'];
+const POSITION_SOURCES=[...SOURCES,...DIRECT_POSITION_SOURCES];
+const DIRECT_UPDATE_SOURCES=['sta_direct_updates'];
+const ALL_UPDATE_SOURCES=[...UPDATE_SOURCES,...DIRECT_UPDATE_SOURCES];
+const ALERT_SOURCES=['sta_alerts'];
+const ENDPOINTS=[...POSITION_SOURCES,...ALL_UPDATE_SOURCES,...ALERT_SOURCES];
+let lastMotionFrame = 0;
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const DETAIL_MAX_AGE = 120000;
+const VEHICLE_KEEP_MS = 30 * 60 * 1000; // Keep a clearly labelled last-known marker during an outage.
+const STALE_MAX_AGE_SEC = 60 * 60; // Never show observations older than 1 hour.
+const MARKER_MAX_AGE_SEC = 12 * 60;
+const AVERAGE_POLL_MS = 20000;
+const BUS_PLAYBACK_LAG_MS = 38000; // Fallback lag for irregular updates, never predict ahead.
+const BUS_TRACK_MAX_GAP_MS = 140000;
+const MAX_INTERPOLATION_METERS = 3000;
+const snapMaxMeters = 350;
+const manualRefreshDelayMs=3000;
+let tileErrorCount=0;
+let tileLoadedCount=0;
+let fallbackTilesUsed=false;
+let tileLastHealthyAt=0;
+let initiallyLocated=false;
+const MAP_PLACES={
+  sterzing:[46.895,11.433,12], bozen:[46.498,11.354,12], brixen:[46.717,11.485,12],
+  meran:[46.670,11.160,12], bruneck:[46.797,11.940,12], trento:[46.068,11.122,12]
+};
+const TILE_PROVIDERS=[
+  {name:'OpenStreetMap',url:'https://tile.openstreetmap.org/{z}/{x}/{y}.png',options:{attribution:'© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-Mitwirkende</a>'}},
+  {name:'OSM HOT',url:'https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',options:{subdomains:'abc',attribution:'© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-Mitwirkende</a> · Tiles © Humanitarian OpenStreetMap Team'}}
+];
+let tileProviderIndex=0;
+const RT_MAX_AGE_SEC=15*60;
+
+function safeText(value) { return txt(value); }
+function duration(ms) {return Math.round(ms/1000)}
+function escapeHtml(value) { return safeText(value).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function E(tag,cls,txt){const e=document.createElement(tag);if(cls)e.className=cls;if(txt!==undefined)e.textContent=txt;return e}
+function B(cls,txt,fn){const b=E('button',cls,txt);b.type='button';if(fn)b.addEventListener('click',fn);return b}
+function setNotice(message, visible=true) {
+  $('notice').hidden=!visible;
+  if(message) $('notice').innerHTML='<button class="info-close" id="noticeClose" aria-label="Hinweis schließen">×</button>'+message;
+  $('noticeClose').onclick=()=> $('notice').hidden=true;
+}
+async function fetchJson(url, timeout=12500) {
+  const ctl=new AbortController(); const timer=setTimeout(()=>ctl.abort(),timeout);
+  try {
+    const r=await fetch(url,{signal:ctl.signal,cache:url.startsWith('/api/')?'no-store':'default'});
+    if(!r.ok)throw new Error('HTTP '+r.status+' · '+url);
+    const json=await r.json();
+    if(json?.error)throw new Error(json.error+' · '+url);
+    return json;
+  } finally {clearTimeout(timer);}
+}
+
+function gtfsLocalDate() {
+  const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Rome',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date());
+  const values=Object.fromEntries(parts.map(p=>[p.type,p.value]));
+  return [values.year,values.month,values.day].join('-');
+}
+function indexReady(source){
+  const db=state.indexes[source];
+  if(!db?.meta?.ready)return false;
+  // A stale static database can map a reused trip ID to the wrong destination or bus line.
+  return Array.isArray(db.meta.days)&&db.meta.days.includes(gtfsLocalDate());
+}
+function allSourceCount(){return Object.values(state.statuses).filter(s=>s==='ok').length}
+function statusLabel() {
+  const good=allSourceCount(), vehicleGood=POSITION_SOURCES.filter(s=>state.statuses[s]==='ok').length;
+  const favCount=state.favorites.size;
+  const status=$('statusBtn');status.classList.toggle('ok',good===ENDPOINTS.length);
+  status.classList.toggle('error',vehicleGood===0);
+  const favText=favCount>0?' · '+favCount+' '+t('misc.favorites')+'★':'';
+  $('statusText').textContent=good===ENDPOINTS.length?t('status.feedsOk'):vehicleGood===0?t('status.offline'):good+'/'+ENDPOINTS.length+favText;
+  const favBtn=$('favBtnTop');if(favBtn){const dot=favBtn.querySelector('.status-dot');if(dot){dot.className='status-dot'+(favCount>0?' fav-active':'');}}
+}
+function isFeedHealthy(){
+  return POSITION_SOURCES.some(s=>state.statuses[s]==='ok'||state.statuses[s]==='old');
+}
+function updateFeedHealthBanner(){
+  const banner=$('feedHealthBanner');
+  if(!banner)return;
+  banner.hidden=isFeedHealthy();
+}
+function updateHealthPanel(){
+  const panel=$('healthPanel');
+  if(!panel||panel.hidden)return;
+  const good=allSourceCount();
+  const vehicleGood=POSITION_SOURCES.filter(s=>state.statuses[s]==='ok').length;
+  const g=SOURCES.filter(indexReady).length;
+  const now=Date.now();
+  const lastUpd=state.fetchedAt?new Date(state.fetchedAt).toLocaleTimeString(getLocale()==='it'?'it-IT':'de-IT',{hour:'2-digit',minute:'2-digit'}):'–';
+  $('healthFeeds').textContent=good+'/'+ENDPOINTS.length;
+  $('healthFeeds').className='health-val '+(good===ENDPOINTS.length?'ok':good>0?'warn':'bad');
+  $('healthVehicles').textContent=state.vehicles.size+' ('+vehicleGood+' '+t('misc.live')+')';
+  $('healthVehicles').className='health-val '+(vehicleGood>0?'ok':vehicleGood===0?'bad':'warn');
+  $('healthRegions').textContent=g+'/3';
+  $('healthRegions').className='health-val '+(g===3?'ok':g>0?'warn':'bad');
+  $('healthUpdated').textContent=lastUpd;
+  $('healthTiles').textContent=tileLoadedCount+' '+t('misc.loaded')+(tileErrorCount>0?' · '+tileErrorCount+' '+t('misc.errors'):'');
+  $('healthTiles').className='health-val '+(tileErrorCount===0?'ok':'warn');
+}
+function updateFavPanel(){
+  const panel=$('favPanel');
+  const body=$('favBody');
+  if(!panel||!body||panel.hidden)return;
+  body.innerHTML='';
+
+  // Fahrzeug-Favoriten
+  const vehicleFavs=[...state.favorites].filter(k=>state.vehicles.has(k));
+  // Linien-Favoriten
+  const lineFavs=[...state.lineFavorites];
+  // Haltestellen-Favoriten
+  const stationFavs=[...state.stationFavorites];
+
+  const total=vehicleFavs.length+lineFavs.length+stationFavs.length;
+  if(total===0){
+    body.innerHTML='<div class="fav-empty" data-t="fav.empty">Keine favorisierten Fahrzeuge. Tippe in einem Fahrzeug-Detail auf „★ Favorit“.</div>';
+    return;
+  }
+
+  // Sektion: Fahrzeuge
+  if(vehicleFavs.length){
+    const h=document.createElement('div');h.className='fav-section-header';h.textContent=t('misc.vehicles');body.append(h);
+    for(const key of vehicleFavs){
+      const v=state.vehicles.get(key);
+      if(!v)continue;
+      const item=document.createElement('div');item.className='fav-item';
+      const info=document.createElement('div');info.className='fav-info';
+      const name=document.createElement('div');name.className='fav-name';name.textContent=v.name;
+      const sub=document.createElement('div');sub.className='fav-sub';sub.textContent=v.headsign||t('detail.trainLineUnverified')+' · '+v.source.toUpperCase();
+      const delay=document.createElement('div');delay.className='fav-delay';
+      const info2=currentVehicleDelay(v);
+      const d=info2?Math.abs(info2.delay||0):0;
+      delay.textContent=d>0?'+'+Math.round(d/60)+' '+t('misc.minutes'):t('lines.onTimeShort');
+      delay.className='fav-delay '+(d>=900?'bad':d>=120?'warn':'ok');
+      info.append(name,sub,delay);
+      const remove=document.createElement('button');remove.className='fav-remove';remove.textContent='✕';remove.title=t('fav.btnRemove');
+      remove.onclick=(e)=>{e.stopPropagation();toggleFavorite(key);updateFavPanel();refreshMarkers();statusLabel();};
+      item.append(info,remove);
+      item.onclick=()=>{selectVehicle(key);$('favPanel').hidden=true;};
+      body.appendChild(item);
+    }
+  }
+
+  // Sektion: Linien
+  if(lineFavs.length){
+    const h=document.createElement('div');h.className='fav-section-header';h.textContent=t('filter.linefav');body.append(h);
+    for(const lineKey of lineFavs){
+      const i=lineKey.indexOf(':');if(i<=0)continue;
+      const source=lineKey.slice(0,i),routeId=lineKey.slice(i+1);
+      const db=state.indexes?.[source];
+      const route=db?.routes?.[routeId];
+      const lineName=route?route[0]:routeId;
+      const lineVehicles=[...state.vehicles.values()].filter(v=>v.source===source&&v.routeId===routeId&&visible(v));
+      const item=document.createElement('div');item.className='fav-item';
+      const info=document.createElement('div');info.className='fav-info';
+      const name=document.createElement('div');name.className='fav-name';name.textContent=lineName;
+      const sub=document.createElement('div');sub.className='fav-sub';sub.textContent=lineVehicles.length+' '+t('misc.vehicles')+' · '+source.toUpperCase();
+      info.append(name,sub);
+      const remove=document.createElement('button');remove.className='fav-remove';remove.textContent='✕';remove.title=t('fav.lineBtnRemove');
+      remove.onclick=(e)=>{e.stopPropagation();toggleLineFavorite(lineKey);updateFavPanel();refreshMarkers();statusLabel();};
+      item.append(info,remove);
+      item.onclick=()=>{setFilter('linefav');$('favPanel').hidden=true;};
+      body.appendChild(item);
+    }
+  }
+
+  // Sektion: Haltestellen
+  if(stationFavs.length){
+    const h=document.createElement('div');h.className='fav-section-header';h.textContent=t('station.title');body.append(h);
+    for(const stationKey of stationFavs){
+      const i=stationKey.indexOf(':');if(i<=0)continue;
+      const source=stationKey.slice(0,i),stopId=stationKey.slice(i+1);
+      const db=state.indexes?.[source];
+      const stop=db?.stops?.[stopId];
+      const stopName=stop?String(stop[0]||stopId):stopId;
+      const item=document.createElement('div');item.className='fav-item';
+      const info=document.createElement('div');info.className='fav-info';
+      const name=document.createElement('div');name.className='fav-name';name.textContent=stopName;
+      const sub=document.createElement('div');sub.className='fav-sub';sub.textContent=stopId+' · '+source.toUpperCase();
+      info.append(name,sub);
+      const remove=document.createElement('button');remove.className='fav-remove';remove.textContent='✕';remove.title=t('fav.btnRemove');
+      remove.onclick=(e)=>{e.stopPropagation();toggleStationFavorite(stationKey);updateFavPanel();refreshMarkers();statusLabel();};
+      item.append(info,remove);
+      item.onclick=()=>{/* Haltestelle im Karten-/Suchkontext anzeigen */$('favPanel').hidden=true;};
+      body.appendChild(item);
+    }
+  }
+}
+function buildLineStatus(){
+  const lines=new Map();
+  for(const v of state.vehicles.values()){
+    if(!v.routeId)continue;
+    const key=v.source+':'+v.routeId;
+    if(!lines.has(key))lines.set(key,{routeId:v.routeId,source:v.source,name:v.name,vehicles:[],maxDelay:0,delayed:0});
+    const l=lines.get(key);
+    l.vehicles.push(v);
+    const info=currentVehicleDelay(v);
+    const d=info?Math.abs(info.delay||0):0;
+    l.maxDelay=Math.max(l.maxDelay,d);
+    if(d>=120)l.delayed++;
+  }
+  // Störungs-Alerts pro Linie einbeziehen
+  for(const source of Object.keys(state.alerts||{})){
+    for(const a of state.alerts[source]||[]){
+      if(a.routeId){
+        const key=source+':'+a.routeId;
+        if(!lines.has(key))lines.set(key,{routeId:a.routeId,source,name:a.routeId,vehicles:[],maxDelay:0,delayed:0});
+        const l=lines.get(key);
+        if(a.cause===3||a.cause===4||a.effect===2||a.effect===4)l.maxDelay=Math.max(l.maxDelay,900);
+      }
+    }
+  }
+  return [...lines.values()].map(l=>{
+    let status='unknown';
+    if(l.maxDelay>=900||l.delayed>0)status='disturbed';
+    else if(l.maxDelay>=120)status='delayed';
+    else if(l.maxDelay>0)status='delayed';
+    else if(l.vehicles.length>0)status='ok';
+    return {...l,status};
+  }).sort((a,b)=>a.name.localeCompare(b.name));
+}
+function renderLinesPanel(){
+  const panel=$('linesPanel');
+  const body=$('linesBody');
+  if(!panel||!body)return;
+  const q=$('linesSearch')?$('linesSearch').value.toLowerCase():'';
+  const filter=$('linesFilter')?document.querySelector('.lines-filters .chip.active')?.dataset?.lineFilter:'all';
+  const lines=buildLineStatus().filter(l=>{
+    if(q&&!l.name.toLowerCase().includes(q)&&!l.routeId.toLowerCase().includes(q))return false;
+    if(filter==='onTime'&&l.status!=='ok')return false;
+    if(filter==='delayed'&&l.status!=='delayed')return false;
+    if(filter==='disturbed'&&l.status!=='disturbed')return false;
+    return true;
+  });
+  body.innerHTML='';
+  if(lines.length===0){
+    body.innerHTML='<div class="lines-empty">Keine Linien gefunden.</div>';
+    return;
+  }
+  for(const l of lines){
+    const item=document.createElement('div');
+    item.className='lines-item';
+    const name=document.createElement('div');
+    name.className='line-name';
+    name.textContent=l.name||l.routeId;
+    const info=document.createElement('div');
+    info.className='line-info';
+    info.textContent=l.vehicles.length+' Fahrzeug'+(l.vehicles.length>1?'en':'')+' · '+l.source.toUpperCase();
+    const status=document.createElement('div');
+    status.className='line-status '+l.status;
+    status.textContent=l.status==='ok'?t('lines.onTimeShort'):l.status==='delayed'?t('lines.delayedBy'):l.status==='disturbed'?t('lines.status.disturbed'):t('lines.status.unknown');
+    const chevron=document.createElement('div');
+    chevron.className='line-chevron';
+    chevron.textContent='›';
+    item.append(name,info,status,chevron);
+    item.onclick=()=>{highlightLine(l.routeId);$('linesPanel').hidden=true;};
+    body.appendChild(item);
+  }
+}
+function highlightLine(routeId){
+  for(const [key,entry] of state.markers){
+    const el=entry.marker.getElement?.();
+    const v=state.vehicles.get(key);
+    if(v&&v.routeId===routeId){el.classList.add('lines-item-line-highlight');}
+    else if(el)el.classList.remove('lines-item-line-highlight');
+  }
+}
+function updateAlertTicker(){
+  const ticker=$('alertTicker');
+  const countEl=ticker.querySelector('.alert-count');
+  const listEl=ticker.querySelector('.alert-list');
+  if(!ticker)return;
+  const all=[];
+  for(const source of Object.keys(state.alerts)){
+    for(const a of state.alerts[source]){
+      all.push({...a, source});
+    }
+  }
+  if(all.length===0){ticker.hidden=true;return;}
+  ticker.hidden=false;
+  countEl.textContent=all.length===1?t('alert.count.one'):t('alert.count.many',{n:all.length});
+  listEl.innerHTML='';
+  const nowSec=Date.now()/1000;
+  for(const a of all.slice(0,8)){
+    const item=document.createElement('div');
+    item.className='alert-item';
+    const cName=t('alert.cause.'+(a.cause||0))||t('alert.stoerung');
+    const effName=t('alert.effect.'+(a.effect||0))||t('alert.stoerung');
+    // Datenaktualität berechnen
+    const ageSec=a.fetchedAt?Math.max(0,Math.floor(nowSec-a.fetchedAt/1000)):null;
+    const ageStr=ageSec!==null?ageSec<60?t('alert.age.just'):ageSec<3600?Math.floor(ageSec/60)+' '+t('alert.age.min'):Math.floor(ageSec/3600)+' '+t('alert.age.hour'):'-';
+    // Schweregrad-Farbe
+    let sevClass='alert-sev-medium';
+    if(a.cause===3||a.cause===4||a.effect===2||a.effect===4)sevClass='alert-sev-high';
+    else if(a.cause===1||a.cause===2||a.cause===5||a.effect===1||a.effect===5)sevClass='alert-sev-low';
+    // Betroffene Linien aus informed_entity (route_id)
+    // route_id aus dem GTFS-RT Feed sind technische IDs, keine lesbaren Liniennummern.
+    // Deshalb nur die Anzahl anzeigen, nicht die kryptischen IDs.
+    let lineCount=0;
+    for(const ent of (a.informed_entity||[])){
+      if(ent.route_id)lineCount++;
+    }
+    const lineStr=lineCount?t('alert.lines',{n:lineCount}):'';
+    item.innerHTML='<span class="alert-chip alert-sev '+sevClass+'">'+cName+'</span>'+escapeHtml(a.header)+(a.description?': '+escapeHtml(a.description.substring(0,70)):'')+(lineStr?' <span class="alert-lines">'+lineStr+'</span>':'')+'<span class="alert-age">'+ageStr+' · '+a.source.toUpperCase()+'</span>';
+    listEl.appendChild(item);
+  }
+  // Einzelner Schließen-Button für das gesamte Ticker-Panel
+  let closeBtn=ticker.querySelector('.alert-close-all');
+  if(!closeBtn){
+    closeBtn=document.createElement('button');
+    closeBtn.className='alert-close-all';
+    closeBtn.textContent=t('alert.closeAll');
+    closeBtn.title='Störungs-Ticker schließen';
+    closeBtn.onclick=()=>{
+      // Aktuelle Alert-IDs merken damit sie beim nächsten Refresh nicht wieder auftauchen
+      for(const source of Object.keys(state.alerts)){
+        for(const a of state.alerts[source]){
+          if(a.id)dismissAlert(a.id);
+        }
+      }
+      state.alerts={};
+      ticker.hidden=true;
+      updateAlertTicker();
+    };
+    ticker.insertBefore(closeBtn, listEl);
+  }
+}
+function showSourceStatus(){
+  const lines=ENDPOINTS.map(ep=>'<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0"><b>'+escapeHtml(ep)+'</b><span>'+ (state.statuses[ep]==='ok'?'✓ '+t('status.feedsOk'):'↻ '+(state.statuses[ep]==='old'?t('status.old'):t('status.error')))+'</span></div>').join('');
+  const g=SOURCES.filter(indexReady).length;
+  setNotice('<strong>Datenquellen · Südtirol Radar '+(window.SuedtirolRadar80?.version?.()||'')+'</strong><div style="margin:7px 0">'+lines+'</div><div>GTFS-Fahrplandaten: <b>'+g+'/3</b> Regionen geladen.</div><div style="margin-top:5px">'+mapMetrics().inside+' Fahrzeuge hier, '+state.markers.size+' Marker geladen, '+state.vehicles.size+' Positionen im Feed. Kartenanbieter: '+escapeHtml(TILE_PROVIDERS[tileProviderIndex].name)+' ('+tileLoadedCount+' Kacheln geladen, '+tileErrorCount+' Fehler).</div><div style="margin-top:5px">Kartenebenen: <b>'+escapeHtml(leafletLayoutHealth())+'</b>.</div><div style="margin-top:5px">STA Open Data Hub: direkter offizieller Positions- und Trip-Update-Feed. Trenitalia/Trentino: teilweise geschätzte Positionen. RFI-Daten sind nur in speziellen Stationsfunktionen verfügbar. Feed-Erreichbarkeit bedeutet nicht echtes GPS.</div>');
+}
+async function loadIndexes(){
+  await Promise.all(SOURCES.map(async source => {
+    try {
+      const db=await fetchJson('/data/'+source+'-index.json',15000);
+      state.indexes[source]=db;
+      if(!indexReady(source)) {
+        console.warn('GTFS index missing or outside its validity dates:',source);
+        state.indexes[source]={meta:{ready:false,note:t('gtfs.indexStale')}};
+      }
+    }
+    catch(e){state.indexes[source]={}; console.warn('GTFS index unavailable:',source,e)}
+  }));
+  try {
+    const db=await fetchJson('/vehicle-models.json',8000);
+    state.models=db.by_train||{};
+  } catch(e){console.warn('Vehicle models unavailable:',e)}
+  state.indexes.sta_direct=state.indexes.sta;
+  const present=SOURCES.filter(indexReady);
+  if(present.length<3)setNotice('<strong>'+t('gtfs.importPending')+'</strong> '+t('gtfs.importPendingDesc',{n:present.length,m:SOURCES.length}));
+}
+async function loadRailShapes(){
+  await Promise.all(SOURCES.map(async source=>{
+    try {state.shapes[source]=await fetchJson('/data/'+source+'-shapes.json',16000)}
+    catch(e){console.warn('Train geometry not loaded:',source,e)}
+  }));
+  state.shapes.sta_direct=state.shapes.sta;
+}
+// Radar 3.7: Matching, verifiable GTFS bus route shapes, generated by tools/build_gtfs.py.
+// A manifest failure never blocks live map markers or the existing rail geometry.
+// The official STA feed uses exactly the same GTFS timetable context as STA.
+async function loadBusShapeManifests(){
+  await Promise.all(['sta','trentino'].map(async source=>{
+    try{
+      const manifest=await fetchJson('/data/'+source+'-bus-index.json',12000);
+      if(manifest?.byShape && typeof manifest.byShape==='object')state.busShapeManifests[source]=manifest;
+    }catch(e){console.info('Bus-GTFS-Strecken noch nicht importiert:',source)}
+  }));
+}
+async function loadBusShapesForVehicles(){
+  const targets=[];
+  const bounds=state.map?.getBounds?.();
+  for(const v of state.vehicles.values()){
+    if(v.kind!=='bus')continue;
+    // Prefer loading the exact confirmed trip or actively tracked bus.
+    if(bounds && v.key!==state.selectedKey && !bounds.contains([v.lat,v.lon]))continue;
+    const manifest=state.busShapeManifests[v.source];
+    const shapeIds=v.shapeId?[v.shapeId]:v.routeShapeId?[v.routeShapeId]:v.routeShapeCandidates||[];
+    // Legacy manifests lack bounding boxes. Do not fetch multiple huge 7MB
+    // shards speculatively over a weak mobile connection; run the 4.5.1 GTFS import first.
+    if(shapeIds.length>1 && !manifest?.bounds && !v.shapeId && !v.routeShapeId)continue;
+    for(const shapeId of shapeIds){
+      if(!withinShapeBounds(manifest?.bounds?.[shapeId],v.lat,v.lon))continue;
+      const file=manifest?.byShape?.[shapeId];
+      if(!file||!new RegExp('^'+v.source+'-bus-[0-9]+-shapes\\.json$').test(file))continue;
+      const key=v.source+'/'+file;
+      if(state.busShapeLoaded.has(key)||state.busShapePending.has(key)||state.busShapeFailures.has(key))continue;
+      if(!targets.some(t=>t.key===key))targets.push({source:v.source,file,key,priority:v.key===state.selectedKey?0:v.shapeId?1:2});
+    }
+  }
+  // Large region sharding is downloaded on demand, never all at once.
+  targets.sort((a,b)=>a.priority-b.priority);
+  const saveData=navigator.connection?.saveData || /^(slow-2g|2g)$/.test(navigator.connection?.effectiveType||'');
+  await Promise.all(targets.slice(0,saveData?1:3).map(async ({source,file,key})=>{
+    state.busShapePending.add(key);
+    try{
+      const data=await fetchJson('/data/'+file,20000);
+      if(!data?.shapes||typeof data.shapes!=='object')throw new Error('Ungültiger GTFS-Streckendatensatz');
+      if(!state.shapes[source])state.shapes[source]={shapes:{}};
+      if(!state.shapes[source].shapes)state.shapes[source].shapes={};
+      Object.assign(state.shapes[source].shapes,data.shapes);
+      state.busShapeLoaded.add(key);
+      refreshMarkers();document.dispatchEvent(new Event('sr37:shapes'));
+    }catch(e){
+      // One bad shard should not repeatedly consume 4G on every 20-second poll.
+      state.busShapeFailures.add(key);
+      console.warn('GTFS-Busstrecke nicht verfügbar:',file,e);
+    }finally{state.busShapePending.delete(key)}
+  }));
+}
+async function loadDetails(source){
+  if(source==='sta_direct')return loadDetails('sta').then(d=>{if(d)state.details.sta_direct=d;return d});
+  if(state.details[source])return state.details[source];
+  // Cache the in-flight promise as well: repeated tapping does not fetch several times.
+  if(!state.detailPending)state.detailPending={};
+  if(!state.detailPending[source])state.detailPending[source]=fetchJson('/data/'+source+'-details.json',20000)
+    .then(d=>{state.details[source]=d;if(source==='sta')state.details.sta_direct=d;return d})
+    .catch(e=>{console.warn('GTFS trip details unavailable',source,e);return null})
+    .finally(()=>delete state.detailPending[source]);
+  return state.detailPending[source];
+}
+// Key-free raster sources. Respect cache headers and provider usage terms.
+// Tiles load only for the user's current viewport (no bulk prefetch).
+function createTileLayer(which=0){
+  const provider=TILE_PROVIDERS[which];
+  return L.tileLayer(provider.url,{
+    minZoom:3,maxZoom:19,maxNativeZoom:19,
+    keepBuffer:2,updateWhenIdle:true,updateWhenZooming:false,
+    ...provider.options
+  });
+}
+function switchTileProvider(which,reason='manuell'){
+  if(!state.map||which===tileProviderIndex||which<0||which>=TILE_PROVIDERS.length)return;
+  const previous=state.tiles;
+  // Critical: NEVER overlay two partly loaded basemap layers. Their independent
+  // tile containers can create black checkerboard gaps in mobile Safari.
+  if(previous&&state.map.hasLayer(previous))state.map.removeLayer(previous);
+  tileProviderIndex=which;fallbackTilesUsed=true;
+  tileLoadedCount=0;tileErrorCount=0;
+  const next=createTileLayer(which);
+  next.on('tileload',()=>{tileLoadedCount++;tileLastHealthyAt=Date.now()});
+  next.on('tileerror',onTileError);
+  state.tiles=next;
+  next.addTo(state.map);
+  if(state.map.getPane('markerPane'))state.map.getPane('markerPane').style.zIndex='650';
+  state.map.invalidateSize({pan:false});
+  console.info('Radar Kartenquelle:',TILE_PROVIDERS[which].name,reason);
+  setNotice('<strong>Kartenanbieter gewechselt:</strong> '+escapeHtml(TILE_PROVIDERS[which].name)+'. Wenn Kacheln fehlen, tippe auf ↻ oder wechsle mit 🗺 zurück.');
+}
+function onTileError(){
+  tileErrorCount++;
+  // Provider changes are only made by the user. Automatic failover previously
+  // mixed tiles from separate layers before either provider had fully loaded.
+  if(tileErrorCount===5){
+    setNotice('<strong>Kartenbilder fehlen.</strong> Der Kartenserver liefert einzelne Kacheln nicht. Tippe auf 🗺, um zum anderen Kartenanbieter zu wechseln. Zug- und Busdaten bleiben unabhängig erreichbar.');
+  }
+}
+function leafletLayoutHealth(){
+  if(!state.map)return 'unbekannt';
+  const tiles=state.map.getPane('tilePane'),pins=state.map.getPane('markerPane');
+  if(!tiles||!pins)return 'fehlende Leaflet-Ebenen';
+  const a=getComputedStyle(tiles),b=getComputedStyle(pins);
+  return a.position==='absolute'&&b.position==='absolute'&&Number.parseInt(b.zIndex,10)>Number.parseInt(a.zIndex,10)
+    ?'OK':'CSS-Positionierung fehlerhaft ('+a.position+'/'+b.position+')';
+}
+function mapMetrics(){
+  if(!state.map)return {inside:0,shown:0,total:state.vehicles.size};
+  let inside=0;
+  const bounds=state.map.getBounds();
+  for(const [,v] of state.vehicles){
+    if(visible(v) && bounds.contains([v.lat,v.lon]))inside++;
+  }
+  return {inside,shown:state.markers.size,total:state.vehicles.size};
+}
+function updateViewportBadge(){
+  const el=$('viewportBadge');if(!el)return;
+  const {inside,shown,total}=mapMetrics();
+  el.textContent=total?(inside?'📍 '+inside+' hier · '+shown+' angezeigt':'📍 0 hier · '+shown+' anderswo'):'📍 Keine Positionen';
+  el.classList.toggle('empty',inside===0 && total>0);
+  el.title='Tippen, um alle sichtbaren Fahrzeugpositionen zu finden';
+}
+function moveToPlace(place){
+  if(!state.map)return;
+  $('areaPicker').hidden=true;
+  if(place==='all'){fitMap();return;}
+  const target=MAP_PLACES[place];if(!target)return;
+  state.map.setView([target[0],target[1]],target[2],{animate:true});
+  updateViewportBadge();
+}
+function changeTheme(theme){
+  document.documentElement.setAttribute('data-theme',theme);
+  $('themeToggle').textContent=theme==='dark'?'☀':'☾';
+  try{localStorage.setItem('sr-theme',theme)}catch(e){}
+  // No URL change/re-download required when switching modes.
+}
+function initMap(){
+  if(window.__radarRecoveryMap){try{window.__radarRecoveryMap.remove()}catch(e){console.warn(e)}window.__radarRecoveryMap=null}
+  if(!window.L){setNotice('<strong>Kartenbibliothek nicht erreichbar.</strong> Prüfe die Internetverbindung oder den Leaflet-CDN.');return false;}
+  const map=L.map('map',{zoomControl:false,attributionControl:true,preferCanvas:true}).setView([46.64,11.35],9);
+  state.map=map;
+  state.tiles=createTileLayer().addTo(map);
+  state.tiles.on('tileload',()=>{tileLoadedCount++;tileLastHealthyAt=Date.now()});
+  state.tiles.on('tileerror',onTileError);
+  // Recalculate Leaflet's viewport when Safari's dynamic toolbar or orientation
+  // changes the available height. Do not continuously redraw tiles.
+  function resizeMap(){ if(state.map && typeof state.map.invalidateSize==='function')state.map.invalidateSize({pan:false,debounceMoveend:true}); }
+  window.addEventListener('resize',resizeMap,{passive:true});
+  window.addEventListener('orientationchange',()=>setTimeout(resizeMap,250),{passive:true});
+  if(window.visualViewport) window.visualViewport.addEventListener('resize',resizeMap,{passive:true});
+  window.addEventListener('pageshow',()=>setTimeout(resizeMap,180),{passive:true});
+  setTimeout(resizeMap,450);
+  setTimeout(resizeMap,1700);
+  // Explicit marker z-index survives broken/blocked external Leaflet CSS.
+  const markerPane=map.getPane('markerPane');if(markerPane)markerPane.style.zIndex='650';
+  state.layer=L.layerGroup().addTo(map);
+  state.trackLayer=L.layerGroup().addTo(map);
+  L.control.zoom({position:'bottomleft'}).addTo(map);
+  map.on('moveend',()=>{
+    updateViewportBadge();
+    clearTimeout(state.shapeViewportTimer);
+    state.shapeViewportTimer=setTimeout(()=>loadBusShapesForVehicles().catch(console.warn),650);
+  });
+  map.on('zoomend',()=>{ $('map').classList.toggle('map-zoomed-out',map.getZoom()<11);updateViewportBadge(); });
+  $('map').classList.toggle('map-zoomed-out',map.getZoom()<11);
+  return true;
+}
+function visible(v){
+  if(state.filter==='trains'&&v.kind!=='train'||state.filter==='buses'&&v.kind!=='bus')return false;
+  if(state.filter==='linefav'){
+    const lineKey=v.routeId?(v.source+':'+v.routeId):'';
+    if(!lineKey||!isLineFavorite(lineKey))return false;
+  }
+  if(state.query&&!`${v.name} ${v.headsign} ${v.vehicleId} ${v.tripId} ${v.routeLongName}`.toLocaleLowerCase('de').includes(state.query))return false;
+  return true;
+}
+function markerIcon(v){
+  const train=v.kind==='train',label=v.name.startsWith('Linie unbekannt')||v.name==='Zugnummer unbekannt'?'':v.name;
+  const isOld=v.stale || (Number.isFinite(v.timestamp) && v.timestamp>1e9 && Date.now()/1000-v.timestamp>300);
+  const isFav=isFavorite(v.key);
+  const lineKey=v.routeId?(v.source+':'+v.routeId):'';
+  const lineFav=lineKey&&isLineFavorite(lineKey);
+  const zoom=state.map?state.map.getZoom():0;
+  const showSpeed=zoom>=13 && v.speed!==null;
+  const cls='marker-wrap '+(train?'train':'bus')+(label?'':' unverified')+(state.selectedKey===v.key?' selected':'')+(isOld?' sr43-stale':'')+(isFav?' favorite':'')+(lineFav?' line-favorite':'');
+  const speedText=showSpeed?'<div class="marker-speed">'+v.speed+' km/h</div>':'';
+  const icon=`<div class="${cls}">${speedText}<div class="marker-label">${escapeHtml(label)}</div><div class="marker-circle">${train?'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2.5" width="14" height="17" rx="4"/><path d="M5 10h14M8 16h1m6 0h1M8 19.5l-2 2m10-2 2 2"/></svg>':'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="16" rx="3"/><path d="M3 11h18M7 15h2m6 0h2M7 19l-2 2m14-2 2 2"/></svg>'}${isFav?'<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22l-5-4.87L2 9.27l6.91-1.02L12 2z"/></svg>':''}</div></div>`;
+  return L.divIcon({className:'radar-custom',html:icon,iconSize:[30,48],iconAnchor:[15,38]});
+}
+function shapeOf(v){
+  const id=v.shapeId || v.routeShapeId;
+  return id ? state.shapes[v.source]?.shapes?.[id] : null;
+}
+function mapTarget(v){
+  const path=shapeOf(v);
+  if(path){
+    const routeOnly=Boolean(v.routeShapeId && !v.shapeId);
+    const snap=routeOnly?routeOnlySnap(path,v.lat,v.lon,v.bearing):shapeProject(path,v.lat,v.lon);
+    if(!snap || snap.distance>(v.kind==='bus'?65:snapMaxMeters))
+      return {lat:v.lat,lon:v.lon,path:null,along:null};
+    return {lat:snap.lat,lon:snap.lon,path,along:snap.along,matchType:routeOnly?'unique':'trip'};
+  }
+  // 4.5.1: Several official variants may exist for the same line and direction.
+  // Choose only one geographically and directionally DISTINCT official GTFS
+  // shape. If two variants are equally plausible, show the real feed point.
+  if(v.kind==='bus' && Array.isArray(v.routeShapeCandidates) && v.routeShapeCandidates.length){
+    const data=state.shapes[v.source]?.shapes||{};
+    const hits=[];
+    for(const id of v.routeShapeCandidates){
+      const candidate=data[id];
+      if(!Array.isArray(candidate)||candidate.length<2)continue;
+      const snap=routeOnlySnap(candidate,v.lat,v.lon,v.bearing);
+      if(snap)hits.push({id,path:candidate,snap});
+    }
+    const match=chooseVerifiedCandidate(hits);
+    if(match)return {lat:match.snap.lat,lon:match.snap.lon,path:match.path,along:match.snap.along,matchType:'candidate',shapeId:match.id};
+  }
+  return {lat:v.lat,lon:v.lon,path:null,along:null};
+}
+function stopJob(key){state.jobs.delete(key);}
+function requestMotionFrame(){if(!frameId)frameId=requestAnimationFrame(animationLoop);}
+function animationLoop(now){
+  frameId=0;
+  // 30 fps cap on mobile: retain final confirmed point and reduce DOM work.
+  const frameGap=window.innerWidth<=600?32:16;
+  if(now-lastMotionFrame<frameGap){if(state.jobs.size||state.busTracks.size)requestMotionFrame();return;}
+  lastMotionFrame=now;
+  // The existing proven rail animation remains unchanged.
+  for(const [key,job] of state.jobs){
+    const marker=state.markers.get(key)?.marker;
+    if(!marker){state.jobs.delete(key);continue;}
+    const v=state.vehicles.get(key);
+    if(!motionDuration(v,null,Date.now(),reducedMotion.matches)){
+      if(v)marker.setLatLng([v.lat,v.lon]);state.jobs.delete(key);continue;
+    }
+    const raw=Math.min(1,(now-job.start)/job.duration);
+    const f=job.replay?raw:raw*raw*(3-2*raw);
+    let pos;
+    if(job.path && job.fromAlong!==null && job.toAlong!==null){
+      pos=pointAtDistance(job.path,job.fromAlong+(job.toAlong-job.fromAlong)*f,job.latReference);
+    }else pos={lat:job.from.lat+(job.to.lat-job.from.lat)*f,lon:job.from.lng+(job.to.lon-job.from.lng)*f};
+    if(pos&&marker.getLatLng().distanceTo([pos.lat,pos.lon])>0.7)marker.setLatLng([pos.lat,pos.lon]);
+    if(raw>=1){marker.setLatLng([job.to.lat,job.to.lon]);state.jobs.delete(key);}
+  }
+  // Road animation follows a real GTFS shape between TWO received fixes.
+  // It intentionally never extrapolates, so sparse feeds may still pause.
+  let roadPending=false;
+  // Compute viewport bounds once per frame rather than once for each bus.
+  const busViewportBounds=state.map?.getBounds?.();
+  for(const [key,track] of state.busTracks){
+    const entry=state.markers.get(key), marker=entry?.marker;
+    if(!marker || now-track.lastSeen>BUS_TRACK_MAX_GAP_MS){state.busTracks.delete(key);continue;}
+    const v=state.vehicles.get(key);
+    if(!motionDuration(v,null)){
+      if(v)marker.setLatLng([v.lat,v.lon]);state.busTracks.delete(key);continue;
+    }
+    if(track.samples.length<2)continue;
+    const newest=track.samples.at(-1);
+    const newestPos=pointAtDistance(track.path,newest.along,track.latReference);
+    // Offscreen vehicles stay on their last confirmed point; don't animate
+    // hundreds of hidden Leaflet DOM nodes on a battery-powered phone.
+    const inView=!busViewportBounds || key===state.selectedKey ||
+      busViewportBounds.contains(marker.getLatLng()) || (newestPos && busViewportBounds.contains([newestPos.lat,newestPos.lon]));
+    if(!inView){
+      if(newestPos && marker.getLatLng().distanceTo([newestPos.lat,newestPos.lon])>1)
+        marker.setLatLng([newestPos.lat,newestPos.lon]);
+      continue;
+    }
+    const showAt=now-playbackLag(track.samples);
+    const along=bufferedAlong(track.samples,showAt);
+    const pos=along===null?null:pointAtDistance(track.path,along,track.latReference);
+    if(pos&&marker.getLatLng().distanceTo([pos.lat,pos.lon])>0.7)marker.setLatLng([pos.lat,pos.lon]);
+    if(showAt<newest.time)roadPending=true;
+  }
+  if(state.jobs.size || roadPending)requestMotionFrame();
+}
+function animateTo(key,entry,target){
+  const marker=entry.marker, current=marker.getLatLng(), dest=L.latLng(target.lat,target.lon);
+  const vehicle=state.vehicles.get(key);
+  const dist=current.distanceTo(dest);
+  stopJob(key);
+  const duration=motionDuration(state.vehicles.get(key),entry.feedTimestamp,Date.now(),reducedMotion.matches);
+  if(!duration){marker.setLatLng(dest);return;}
+  if(dist<1.5)return;
+  if(state.map && typeof state.map.getBounds==='function'){
+    const view=state.map.getBounds();
+    if(!view.contains(current) && !view.contains(dest)){marker.setLatLng(dest);return;}
+  }
+  if(dist>MAX_INTERPOLATION_METERS||reducedMotion.matches||document.hidden){marker.setLatLng(dest);return;}
+  const oldAlong=entry.target?.along;
+  const fromSnap=target.path ? shapeProject(target.path,current.lat,current.lng) : null;
+  const alongDelta=fromSnap && Number.isFinite(target.along)
+    ? target.along-fromSnap.along : NaN;
+  const previousVerified=entry.target?.path === target.path && Number.isFinite(oldAlong);
+  const followShape=Boolean(target.path && fromSnap && fromSnap.distance<90 &&
+    Number.isFinite(alongDelta) && Math.abs(alongDelta)<3000 && alongDelta>=-75 &&
+    (!previousVerified || Math.abs(target.along-oldAlong)<3000));
+  const replay=followShape?trainReplayDuration(vehicle,entry.feedTimestamp,dist,Date.now(),reducedMotion.matches):0;
+  state.jobs.set(key,{start:performance.now(),
+    duration:replay||Math.min(5500,Math.max(800,boundedMotionDuration(dist,vehicle?.kind))),
+    replay:Boolean(replay),
+    from:current,to:{lat:target.lat,lon:target.lon},
+    path:followShape?target.path:null,fromAlong:followShape?fromSnap.along:null,
+    toAlong:followShape?target.along:null,latReference:current.lat});
+  requestMotionFrame();
+}
+function updateBusMotion(key,entry,target,v){
+  stopJob(key);
+  const marker=entry.marker;
+  // Road geometry must be grounded and the vehicle must not be stale.
+  // Without an official matching shape we must NOT draw a straight line through buildings.
+  const age=v.timestamp?Date.now()/1000-v.timestamp:Infinity;
+  if(!target.path || !Number.isFinite(target.along) || v.stale || !Number.isFinite(age) || age>300 || age< -30 ||
+     reducedMotion.matches || document.hidden){
+    state.busTracks.delete(key);
+    marker.setLatLng([target.lat,target.lon]);
+    return;
+  }
+  const now=performance.now();
+  const previous=state.busTracks.get(key);
+  const last=previous?.samples?.at(-1);
+  const sameRoute=previous?.path===target.path && previous?.tripKey===(v.tripId||v.routeShapeId);
+  const delta=last?target.along-last.along:0;
+  const badJump=last && (delta < -20 || delta > MAX_INTERPOLATION_METERS || now-last.time>BUS_TRACK_MAX_GAP_MS);
+  if(!sameRoute || badJump || !previous){
+    state.busTracks.set(key,{path:target.path,tripKey:v.tripId||v.routeShapeId,
+      latReference:target.lat,lastSeen:now,lastFeedTs:v.timestamp||0,
+      samples:[{time:now,along:target.along}]});
+    marker.setLatLng([target.lat,target.lon]);
+    return;
+  }
+  previous.lastSeen=now;
+  if(v.timestamp && previous.lastFeedTs && v.timestamp<=previous.lastFeedTs)return;
+  previous.lastFeedTs=v.timestamp||0;
+  // An actual stationary update must hold the marker, not force speed.
+  const along=Math.max(last.along,target.along);
+  previous.samples.push({time:now,along});
+  previous.samples=previous.samples.slice(-5);
+  requestMotionFrame();
+}
+function refreshMarkers(){
+  if(!state.map)return;
+  const fusion=selectRepresentatives(state.vehicles.values(),state.selectedKey);state.fusion={sources:fusion.sources,keys:fusion.keys,duplicates:fusion.duplicates};
+  const active=new Set();
+  for(const [key,v] of state.vehicles){
+    if(!visible(v)||!fusion.keys.has(key))continue;
+    active.add(key);
+    const rawTarget={lat:v.lat,lon:v.lon,path:null,along:null};
+    const target=motionDuration(v,null)?mapTarget(v):rawTarget;
+    const aged=v.stale || (Number.isFinite(v.timestamp) && v.timestamp>1e9 && Date.now()/1000-v.timestamp>300);
+    const lineKey=v.routeId?(v.source+':'+v.routeId):'';
+    const iconKey=`${v.kind}|${v.name}|${state.selectedKey===key}|${aged}|${lineKey}`;
+    let entry=state.markers.get(key);
+    if(!entry){
+      const marker=L.marker([target.lat,target.lon],{icon:markerIcon(v),keyboard:true,title:v.name}).addTo(state.layer);
+      marker.on('click',()=>selectVehicle(key));
+      entry={marker,iconKey,target,feedTimestamp:v.timestamp};state.markers.set(key,entry);
+      // First bus position is a real feed observation, not a predicted position.
+      if(v.kind==='bus' && !v.stale && v.timestamp && Date.now()/1000-v.timestamp<=300 &&
+         target.path && Number.isFinite(target.along)){
+        state.busTracks.set(key,{path:target.path,tripKey:v.tripId||v.routeShapeId,
+          latReference:target.lat,lastSeen:performance.now(),lastFeedTs:v.timestamp||0,
+          samples:[{time:performance.now(),along:target.along}]});
+      }
+    }else{
+      if(iconKey!==entry.iconKey){entry.marker.setIcon(markerIcon(v));entry.iconKey=iconKey;}
+      if(entry.target.lat!==target.lat||entry.target.lon!==target.lon || entry.target.path!==target.path){
+        if(v.kind==='bus')updateBusMotion(key,entry,target,v);
+        else animateTo(key,entry,target);
+        entry.target=target;
+      }
+    }
+    entry.feedTimestamp=v.timestamp;
+    // Fahrzeug-Trajektur aufzeichnen (letzte 30 Positionen pro Fahrzeug)
+    const trk=state.vehicleTracks.get(key);
+    const last=trk&&trk.points.length?trk.points[trk.points.length-1]:null;
+    if(!last||Math.abs(last.lat-v.lat)>0.0001||Math.abs(last.lng-v.lng)>0.0001){
+      addTrackPoint(key,v.lat,v.lng);
+    }
+    if(!motionDuration(v,null)){
+      stopJob(key);state.busTracks.delete(key);entry.marker.setLatLng([v.lat,v.lon]);
+    }
+    if(v.kind==='bus' && v.stale && state.busTracks.has(key)){
+      state.busTracks.delete(key);
+      entry.marker.setLatLng([target.lat,target.lon]);
+    }
+    entry.marker.setOpacity(v.stale?.75:1);
+  }
+  state.performance.lastMarkerRefresh=Date.now();
+  for(const [key,entry] of state.markers)if(!active.has(key)){
+    stopJob(key);state.busTracks.delete(key);state.layer.removeLayer(entry.marker);state.markers.delete(key);
+  }
+}
+function displayStats(){
+  const keys=state.fusion?.keys||selectRepresentatives(state.vehicles.values(),state.selectedKey).keys;
+  const all=[...state.vehicles.values()].filter(v=>keys.has(v.key));
+  $('countAll').textContent=all.length;$('countTrains').textContent=all.filter(v=>v.kind==='train').length;
+  $('countBuses').textContent=all.filter(v=>v.kind==='bus').length;
+  const staleCount=all.filter(v=>v.stale || (v.timestamp && Date.now()/1000-v.timestamp>300)).length;
+  const localeDate=getLocale()==='it'?'it-IT':'de-IT';
+  $('lastUpdate').textContent=state.fetchedAt?t('time.lastUpdate')+' '+new Date(state.fetchedAt).toLocaleString(localeDate,{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'})+(staleCount?' · '+staleCount+' '+t('status.notLive'):''):t('time.noData');
+  // Feature B/E: Netzwerkübersicht und Verspätungsverteilung (nur wenn Daten verfügbar)
+  const issues=collectTrafficIssues(state,Date.now(),80);
+  const net=networkOverview(state,Date.now(),80,issues);
+  const dist=delayDistribution(issues);
+  const footer=$('lastUpdate').parentElement;
+  const oldNet=footer.querySelector('.network-stats');
+  if(oldNet)oldNet.remove();
+  if(net.totalIssues>0||net.feedAvailability!==null){
+    const netSec=document.createElement('div');netSec.className='network-stats';
+    netSec.append(E('strong',t('network.title')));
+    netSec.append(document.createTextNode(' · '+net.summary));
+    if(net.feedAvailability!==null){
+      netSec.append(document.createTextNode(' · '+t('network.feedAvailable')+': '+net.feedAvailability+'% '));
+    }
+    if(dist.cancelled>0||dist['15plus']>0||dist['5-15']>0){
+      const distSec=document.createElement('div');distSec.className='delay-dist';
+      distSec.textContent=t('analytics.delayDistribution')+': '+(dist['0-5']||0)+' '+t('analytics.delay0to5')+', '+(dist['5-15']||0)+' '+t('analytics.delay5to15')+', '+(dist['15plus']||0)+' '+t('analytics.delay15plus')+(dist.cancelled?', '+dist.cancelled+' '+t('analytics.cancelled'):'');
+      netSec.append(distSec);
+    }
+    footer.append(netSec);
+  }
+}
+async function refreshFeeds(){
+  if(state.busy)return;
+  state.busy=true;$('statusText').textContent=t('status.loading');
+  try{
+    const results=await Promise.allSettled(ENDPOINTS.map(name=>fetchJson('/api/'+name,16000)));
+    const {ok, oldFeeds, statuses}=buildFeedStatus(results, ENDPOINTS);
+    state.statuses=statuses;
+    for(const [name, feed] of Object.entries(ok)){
+      state.lastSuccess[name]=Date.now();
+    }
+    for(const name of ENDPOINTS){
+      if(statuses[name]!=='ok' && statuses[name]!=='old'){
+        console.warn('Feed unavailable or outdated',name,statuses[name]);
+      }
+    }
+    const now=Date.now();state.fetchedAt=now;
+    for(const source of POSITION_SOURCES){
+      if(!ok[source] && !oldFeeds[source])continue;
+      // Old upstream data is last-known context, never live GPS or moving animation.
+      const staleFeed=!ok[source];
+      const {parsed, latest}=processPositionFeed(source, ok[source]||oldFeeds[source], now, state.indexes, gtfsLocalDate());
+      state.counts[source]=parsed;
+      mergePositionVehicles(state.vehicles, latest, source, now, staleFeed);
+    }
+    pruneStaleVehicles(state.vehicles, now, state.statuses);
+    processUpdates(ok, state, now);
+    // Alerts verarbeiten (gelöschte Alert-IDs werden ausgefiltert)
+    for(const source of ALERT_SOURCES){
+      if(!ok[source])continue;
+      const parsed=parseAlerts(ok[source],source,now);
+      state.alerts[source]=parsed.filter(a=>!state.dismissedAlerts.has(a.id));
+    }
+    // Alte Alerts entfernen wenn Feed nicht mehr antwortet
+    for(const s of Object.keys(state.alerts))if(!ok[s])delete state.alerts[s];
+    state.failCount=ENDPOINTS.filter(s=>state.statuses[s]!=='ok').length;
+    statusLabel();updateFeedHealthBanner();updateFavPanel();updateAlertTicker();refreshMarkers();state.diagnostics=feedDiagnostics(state.vehicles.values(),state.statuses,Date.now(),state.fusion);displayStats();refreshScheduleMatches();
+    // Bus-shape fetching happens after the live updates; do not delay feed painting.
+    loadBusShapesForVehicles().catch(e=>console.info('Bus shape preload:',e));
+    if(!initiallyLocated && state.vehicles.size && state.map){
+      initiallyLocated=true;
+      // On the first successful update, find real positions if the default viewport is empty.
+      // Do not reposition the map again or override user navigation.
+      if(mapMetrics().inside===0){fitMap();}
+    }
+    updateViewportBadge();
+    document.dispatchEvent(new Event('sr40:feeds'));
+    if(state.selectedKey && state.activeSheet==='vehicle'){
+      if(state.vehicles.has(state.selectedKey))drawVehicleDetails(state.selectedKey,false);
+      else {closeSheets();setNotice('<strong>Fahrzeug verschwunden:</strong> Dieser Zug oder Bus wird nicht mehr im aktuellen Positionsfeed gemeldet. Es wird keine Position erfunden.');}
+    }
+    document.dispatchEvent(new Event('sr37:feeds'));
+  }catch(e){
+    console.error('Unexpected refresh error',e);
+    $('statusText').textContent=t('status.error');$('statusBtn').classList.add('error');
+  }finally{state.busy=false;}
+}
+function setFilter(which){state.filter=which;document.querySelectorAll('[data-filter]').forEach(b=>b.classList.toggle('active',b.dataset.filter===which));refreshMarkers();refreshScheduleMatches();updateViewportBadge();}
+function openSheet(which){
+  closeSheets(false);
+  state.activeSheet=which;
+  const id=which==='station'?'stationSheet':'sheet';
+  const sheet=$(id);
+  const scroller=sheet.querySelector('.sheet-scroll');
+  if(scroller)scroller.scrollTop=0;
+  sheet.classList.add('open');
+  sheet.setAttribute('aria-hidden','false');
+  // 9.5: Der Fokus wandert in das Panel und kommt beim Schliessen zurueck.
+  try{sheet.focus({preventScroll:true})}catch{}
+  $('scrim').classList.add('show');
+  // Karte neu rendern, da sich das sichtbare Viewport geaendert hat (Sheet-Overlay)
+  setTimeout(()=>{state.map?.invalidateSize?.()},0);
+}
+function closeSheets(resetSelection=true){
+  for(const id of ['sheet','stationSheet']){$(id).classList.remove('open');$(id).setAttribute('aria-hidden','true');}
+  // 9.5: Der Fokus geht zurueck auf die Karte.
+  try{$('map')?.focus({preventScroll:true})}catch{}
+  document.body.classList.remove('sr71-focusing');
+  $('scrim').classList.remove('show');state.activeSheet=null;
+  if(resetSelection){state.selectedKey=null;refreshMarkers();}
+  state.trackLayer.clearLayers();
+  document.dispatchEvent(new Event('sr37:sheet-closed'));
+  // Karte neu rendern, da sich das sichtbare Viewport geaendert hat (Sheet-Overlay geschlossen)
+  setTimeout(()=>{state.map?.invalidateSize?.()},0);
+}
+function badge(text,style=''){const el=document.createElement('span');el.className='mini-badge '+style;el.textContent=text;return el;}
+function detail(name,value,cls=''){const el=document.createElement('div');el.className='detail'+(cls?' '+cls:'');const small=document.createElement('small');small.textContent=name;const strong=document.createElement('strong');strong.textContent=value;el.append(small,strong);$('details').append(el);}
+function modelFor(v){if(v.kind!=='train')return null;
+  // Model dictionary is explicitly keyed by real train number or exact GTFS trip ID.
+  const model=state.models[v.name]||state.models[v.tripId];
+  if(!model||!['confirmed','planned'].includes(model.confidence)||!txt(model.source)||!txt(model.name))return null;
+  return model;
+}
+function urlSafe(href){try{const url=new URL(href);return url.protocol==='https:'}catch{return false}}
+function renderModel(v){const model=modelFor(v),card=$('modelCard'),img=$('modelImage');card.hidden=true;img.removeAttribute('src');
+  if(!model || !urlSafe(model.image))return;
+  $('modelTitle').textContent=model.name;
+  $('modelCaption').textContent=(model.confidence==='confirmed'?t('detail.trainType.confirmed'):t('detail.trainType.planned'))+' · '+model.source+' · '+t('detail.modelCard');
+  img.onerror=()=>{card.hidden=true;img.removeAttribute('src')};
+  img.src=model.image;card.hidden=false;
+}
+function drawVehicleDetails(key,fetchSchedule){
+  const v=state.vehicles.get(key);if(!v)return;
+  $('sheetKind').textContent=v.kind==='train'?t('detail.train')+' · '+v.source.toUpperCase():t('detail.bus')+' · '+v.source.toUpperCase();
+  $('sheetTitle').textContent=(v.kind==='train'?'🚆 ':'🚌 ')+(v.name||t('detail.label.unknownTarget'));
+  $('sheetSub').textContent=v.headsign;
+  const badges=$('sheetBadges');badges.replaceChildren();
+  badges.append(badge(v.kind==='train'?t('detail.kind.train'):t('detail.kind.bus')));
+  badges.append(badge(v.stale?t('detail.status.stale'):t('detail.status.live'),v.stale?'warn':'ok'));
+  badges.append(badge(v.positionType,'warn'));
+  if(v.kind==='bus') badges.append(badge(v.lineVerified?t('detail.line.verified'):t('detail.line.unverified'),v.lineVerified?'ok':'warn'));
+  const favBtn=document.createElement('button');
+  favBtn.className='badge fav-badge';
+  favBtn.textContent=isFavorite(v.key)?'★ Favorit':'☆ Favorit';
+  favBtn.title=isFavorite(v.key)?'Aus Favoriten entfernen':'Zu Favoriten hinzufügen';
+  favBtn.onclick=()=>{toggleFavorite(v.key);favBtn.textContent=isFavorite(v.key)?t('fav.btnRemove'):t('fav.btnAdd');favBtn.title=isFavorite(v.key)?t('fav.btnRemove'):t('fav.btnAdd');refreshMarkers();statusLabel();};
+  badges.append(favBtn);
+  renderModel(v);
+  $('details').replaceChildren();
+  detail(t('detail.label.trainLine'),v.name);
+  const update=state.updates.get(v.source+':'+v.tripId);
+  const cancelled=/^(?:CANCELED|CANCELLED|3)$/i.test(update?.scheduleRelationship||'');
+  detail(t('detail.label.status'),cancelled?t('detail.status.cancelled'):update?t('detail.status.rtAvailable'):t('detail.status.noRt'));
+  const info=currentVehicleDelay(v);
+  let delayCls='delay-none';
+  if(info){
+    const d=Math.abs(info.delay||0);
+    delayCls=d>=900?'delay-severe':d>=120?'delay-warn':'delay-ok';
+  }
+  detail(t('detail.label.delay'),cancelled?t('detail.status.delayed'):info?formatDelay(info.delay)+(info.basis==='fahrt'?t('detail.delay.tripValue'):/^(STOPPED_AT|1)$/i.test(v.currentStatus)?t('detail.delay.atStop'):t('detail.delay.nextStop')):t('detail.status.noDelayData'),delayCls);
+  detail(t('detail.label.destination'),v.headsign);
+  detail(t('detail.label.vehicleId'),v.vehicleId);
+  detail(t('detail.label.tripId'),v.tripId||t('detail.label.notAvailable'));
+  // Zwei getrennte Werte: die gemeldete Verspaetung und die Abweichung vom Fahrplan.
+  // Die eine ist eine Zeitangabe, die andere eine Ortsangabe.
+  const schedule=trainScheduledPosition(v,state.indexes,state.details,state.shapes);
+  if(schedule)detail(t('detail.label.planDeviation'),'~'+schedule.differenceKm.toFixed(1)+t('detail.delay.km')+' '+schedule.relative+' ('+schedule.from+' - '+schedule.to+')');
+  // Feature A: Live Journey Intelligence – nächste und kommende Haltestellen, Verspätungsentwicklung, Datenvertrauen
+  const journey=buildJourney(v,state.indexes,state.details,state.shapes,state.updates,state.statuses,Date.now());
+  if(journey){
+    const jSec=document.createElement('div');jSec.className='detail-section journey-section';
+    jSec.append(E('strong',t('journey.title')));
+    if(journey.nextStop){
+      const stopRow=document.createElement('div');stopRow.className='journey-stop';
+      const stopName=document.createElement('b');stopName.textContent=t('board.stop')+': '+journey.nextStop.name;
+      stopRow.append(stopName);
+      const stopInfo=document.createElement('span');
+      if(journey.nextStop.delaySec!==null){
+        stopInfo.textContent=formatJourneyDelay(journey.nextStop.delaySec)+' · '+t('journey.delay.basis.'+journey.nextStop.forecastBasis)+' · '+t('journey.forecast.'+journey.nextStop.forecastQuality);
+      } else {
+        stopInfo.textContent=t('journey.noForecast');
+      }
+      stopRow.append(stopInfo);
+      jSec.append(stopRow);
+    }
+    if(journey.upcoming&&journey.upcoming.length>0){
+      const up=document.createElement('div');up.className='journey-upcoming';
+      up.append(E('small',t('station.schedule')));
+      for(const st of journey.upcoming.slice(0,4)){
+        const li=document.createElement('div');li.className='journey-stop-upcoming';
+        li.textContent=st.name+(st.plannedArr!==null?' · '+formatClock(st.plannedArr):'');
+        up.append(li);
+      }
+      jSec.append(up);
+    }
+    const trustRow=document.createElement('div');trustRow.className='journey-trust';
+    trustRow.textContent=t('detail.label.reliability')+': '+t('journey.trust.'+journey.trust);
+    jSec.append(trustRow);
+    // Feature C: Journey-Favorit (Trip-basiert, konsistent mit app-state.js journeyFavorites)
+    if(journey.tripId){
+      const jFavKey=v.source+':'+journey.tripId;
+      const jFavBtn=document.createElement('button');
+      jFavBtn.className='badge journey-fav-badge';
+      jFavBtn.textContent=isJourneyFavorite(jFavKey)?t('fav.btnRemove'):t('fav.btnAdd');
+      jFavBtn.title=isJourneyFavorite(jFavKey)?t('fav.btnRemove'):t('fav.btnAdd');
+      jFavBtn.onclick=()=>{
+        const nowFav=toggleJourneyFavorite(jFavKey);
+        jFavBtn.textContent=nowFav?t('fav.btnRemove'):t('fav.btnAdd');
+        jFavBtn.title=nowFav?t('fav.btnRemove'):t('fav.btnAdd');
+        refreshMarkers();statusLabel();
+      };
+      jSec.append(jFavBtn);
+    }
+    // Linien- und Haltestellen-Favoriten anzeigen (Read-Only über journeyFavoriteStatus)
+    const favs=[...state.lineFavorites].map(k=>{const i=k.indexOf(':');return{type:'line',value:k.slice(i+1),source:k.slice(0,i)}})
+      .concat([...state.favorites].map(k=>state.vehicles.get(k)?.tripId?{type:'train',value:state.vehicles.get(k).tripId,source:state.vehicles.get(k).source}:null).filter(Boolean));
+    const favStatus=journeyFavoriteStatus(journey,favs);
+    if(favStatus){
+      const favHint=document.createElement('div');favHint.className='journey-fav-hint';
+      favHint.textContent=t('fav.status');
+      jSec.append(favHint);
+    }
+    $('details').append(jSec);
+  }
+  detail(t('detail.label.positionAge'),feedAgeSeconds(v)===null?t('detail.label.notAvailable'):duration(feedAgeSeconds(v)*1000)+t('detail.delay.sec'));
+  detail(t('detail.label.speed'),v.speed===null?t('detail.label.notAvailable'):v.speed+t('detail.delay.kmh'));
+  detail(t('detail.label.source'),v.source.toUpperCase()+' / GTFS-RT');
+  const quality=observationQuality(v,Date.now());
+  detail(t('detail.label.reliability'),quality.status.toUpperCase(),quality.status==='aktuell'?'delay-ok':quality.status==='verzögert'?'delay-warn':'delay-severe');
+  const lineKey=v.routeId?(v.source+':'+v.routeId):'';
+  if(lineKey){
+    const favBtn=document.createElement('button');
+    favBtn.className='badge line-fav-badge';
+    favBtn.textContent=isLineFavorite(lineKey)?t('fav.lineBtnRemove'):t('fav.lineBtnAdd');
+    favBtn.title=isLineFavorite(lineKey)?t('fav.lineBtnRemove'):t('fav.lineBtnAdd');
+    favBtn.onclick=()=>{toggleLineFavorite(lineKey);favBtn.textContent=isLineFavorite(lineKey)?t('fav.lineBtnRemove'):t('fav.lineBtnAdd');favBtn.title=isLineFavorite(lineKey)?t('fav.lineBtnRemove'):t('fav.lineBtnAdd');refreshMarkers();statusLabel();};
+    badges.append(favBtn);
+  }
+  // Gleiche Linie: andere Fahrzeuge derselben Route anzeigen
+  const lineVehicles=[...state.vehicles.values()].filter(v2=>v2.key!==key&&v2.routeId===v.routeId&&v2.source===v.source&&visible(v2));
+  if(lineVehicles.length){
+    const sec=document.createElement('div');sec.className='detail-section';
+    sec.append(E('strong',t('detail.label.sameLine',{n:lineVehicles.length})));
+    const list=E('div','line-vehicles');
+    for(const lv of lineVehicles.slice(0,8)){
+      const btn=B('badge line-item',lv.name,()=>{selectVehicle(lv.key);});
+      btn.title=lv.headsign||t('detail.label.unknownTarget');
+      const delay=currentVehicleDelay(lv);
+      const dCls=delay? (Math.abs(delay.delay||0)>=120?'delay-severe':Math.abs(delay.delay||0)>=30?'delay-warn':'delay-ok') : 'delay-none';
+      btn.append(E('small',formatDelay(delay?.delay||0)+(delay?.basis==='fahrt'?t('detail.delay.tripValue').slice(1):''),dCls));
+      list.append(btn);
+    }
+    sec.append(list);
+    $('details').append(sec);
+  }
+  let note=t('detail.note.feedValue')+' ';
+  if(v.stale)note+=t('detail.note.stale')+' ';
+  if(v.kind==='bus'&&!v.lineVerified)note+=t('detail.note.busNoLine')+' ';
+  if(v.kind==='bus')note+=mapTarget(v).path?t('detail.note.busMovement')+' ':t('detail.note.busNoShape')+' ';
+  if(v.kind==='train'&&!v.nameVerified)note+=t('detail.note.trainNoNumber')+' ';
+  if(v.kind==='train')note+=state.jobs.get(v.key)?.replay ? t('detail.note.trainReplay')+' ' : t('detail.note.trainPositions')+' ';
+  $('sheetNote').textContent=note;
+  if(fetchSchedule)loadSchedule(key);
+  else if(state.details[v.source])renderStops(v,state.details[v.source]);
+}
+function renderStops(v,details){
+  const rows=stopRows(details,v.tripId);
+  const section=$('scheduleSection'),list=$('stops'),empty=$('emptySchedule');
+  list.replaceChildren();section.hidden=!rows.length;empty.hidden=!!rows.length;
+  if(!rows.length)return;
+  const update=state.updates.get(v.source+':'+v.tripId);
+  $('scheduleSource').textContent=t('board.source')+(update?.stops?.length?t('board.tripUpdate'):'');
+  const lookup=new Map((update?.stops||[]).map(u=>[txt(u.stopId??u.stop_id),u]));
+  const sameDay=!update?.tripStartDate||txt(update.tripStartDate).replaceAll('-','')===gtfsLocalDate().replaceAll('-','');
+  const platformLive=Boolean(update&&sameDay&&state.statuses[v.source+'_updates']==='ok'&&Number.isFinite(update.fetchedAt)&&Date.now()-update.fetchedAt<=120000&&Date.now()>=update.fetchedAt-30000);
+  for(const row of rows){
+    const li=document.createElement('li');li.className='stop';
+    const left=document.createElement('div');const name=document.createElement('b');name.textContent=row.name;left.append(name);
+    const upd=lookup.get(row.stopId)||(update?.stops||[]).find(u=>!txt(u.stopId??u.stop_id)&&Number(u.stopSequence??u.stop_sequence)===Number(row.seq));
+    const platform=platformInfo(details.stops?.[row.stopId],platformLive?upd:null,details.stops);
+    const track=document.createElement('small');track.className='stop-platform';
+    track.textContent=(v.kind==='bus'?t('board.stop')+' ':(t('board.platform')+' '))+(platform.current||t('board.unknown'))+(platform.changed?t('board.changed'):platform.live?t('board.live'):platform.current?t('board.plan'):'');
+    if(platform.changed)track.style.color='#ffc37d';
+    left.append(track);
+    if(v.kind==='train'){
+      const timing=details.times?.[v.tripId]?.find(t=>String(t[0])===String(row.stopId)&&Number(t[3])===Number(row.seq));
+      enrichTrainPlatform(track,{number:state.indexes[v.source]?.trips?.[v.tripId]?.[3]||v.name,serviceDay:v.tripStartDate||gtfsLocalDate(),source:v.source,stopId:row.stopId,stopName:row.name,arrival:timing?.[1],departure:timing?.[2],terminal:Boolean(timing&&timing===details.times?.[v.tripId]?.at(-1))},platform);
+    }
+    const d=upd?(upd.departure?.delay??upd.arrival?.delay):null;
+    const skipped=/^(?:SKIPPED|1)$/i.test(txt(upd?.scheduleRelationship??upd?.schedule_relationship));
+    const info=document.createElement('small');info.textContent=skipped?t('station.skipped'):d!=null?t('board.rtDelay')+formatDelay(Number(d)):t('station.planTime');left.append(info);
+    const time=document.createElement('div');time.className='stop-time';time.textContent=row.departure!=='–'?row.departure:row.arrival;
+    li.append(left,time);list.append(li);
+  }
+}
+async function loadSchedule(key){
+  const v=state.vehicles.get(key);if(!v)return;
+  $('scheduleSection').hidden=true;$('emptySchedule').hidden=false;$('emptySchedule').textContent=t('station.loading');
+  const details=await loadDetails(v.source);
+  if(state.selectedKey!==key||state.activeSheet!=='vehicle')return;
+  if(details)renderStops(v,details);
+  else $('emptySchedule').textContent=t('station.noStops');
+}
+function selectVehicle(key){
+  if(!state.vehicles.has(key))return;
+  if(window.SuedtirolRadar71?.enabled&&!document.hidden)document.body.classList.add('sr71-focusing');
+  // Klick auf bereits ausgewähltes Fahrzeug schließt das Panel (Toggle).
+  if(state.selectedKey===key&&state.activeSheet==='vehicle'){closeSheets();return;}
+  state.selectedKey=key;
+  document.dispatchEvent(new Event('sr40:selection'));
+  $('scheduleMatches').hidden=true;openSheet('vehicle');refreshMarkers();drawVehicleDetails(key,true);drawVehicleTrack(key);
+  document.dispatchEvent(new Event('sr37:selection'));
+}
+function drawVehicleTrack(key){
+  state.trackLayer.clearLayers();
+  const pts=getTrackPoints(key);
+  if(!pts||pts.length<2)return;
+  const latlngs=pts.map(p=>[p.lat,p.lng]);
+  L.polyline(latlngs,{className:'sr-track-line',color:'#ff3b30',weight:3,opacity:0.8}).addTo(state.trackLayer);
+  const first=pts[0],last=pts[pts.length-1];
+  L.circleMarker([first.lat,first.lng],{radius:6,fillColor:'#ff3b30',color:'#ffffff',weight:2,fillOpacity:0.8}).addTo(state.trackLayer);
+  L.circleMarker([last.lat,last.lng],{radius:8,fillColor:'#ff3b30',color:'#ffffff',weight:2,fillOpacity:0.9}).addTo(state.trackLayer);
+}
+function fitMap(){
+  const locations=[...state.markers.values()].map(e=>e.marker.getLatLng());
+  if(locations.length>1)state.map.fitBounds(L.latLngBounds(locations),{paddingTopLeft:[35,158],paddingBottomRight:[35,125],maxZoom:11});
+  else if(locations.length===1)state.map.setView(locations[0],12);
+  else state.map.setView([46.64,11.35],9);
+  updateViewportBadge();
+}
+async function getStationList(){
+  if(state.stationList.length)return state.stationList;
+  await Promise.all(SOURCES.map(s=>loadDetails(s)));
+  const all=[];
+  for(const s of SOURCES){for(const [stopId,record] of Object.entries(state.details[s]?.stops||{})){
+    if(!record[0])continue;
+    const lat=Number(record[1]),lon=Number(record[2]);
+    if(lat<BBOX.south||lat>BBOX.north||lon<BBOX.west||lon>BBOX.east)continue;
+    all.push({source:s,stopId,name:record[0],lat,lon});
+  }}
+  state.stationList=all;
+  return all;
+}
+async function showStations(){
+  openSheet('station');$('stationBoard').hidden=true;$('stationResults').hidden=false;
+  $('stationResults').textContent=t('station.loadingStops');
+  await getStationList();
+  if(state.activeSheet!=='station')return;
+  renderStationResults();
+}
+async function openStationFromMap(st){
+  await showStations();
+  if(state.activeSheet==='station')showStationBoard(st);
+}
+function renderStationResults(){
+  const q=$('stationSearch').value.toLocaleLowerCase('de').trim(),list=$('stationResults');list.replaceChildren();
+  const matches=state.stationList.filter(st=>!q||st.name.toLocaleLowerCase('de').includes(q)).slice(0,40);
+  if(!state.stationList.length){list.textContent=t('station.noStations');return;}
+  for(const st of matches){const btn=document.createElement('button');btn.className='station-result';
+    const body=document.createElement('div');const strong=document.createElement('strong');strong.textContent=st.name;
+    const small=document.createElement('small');small.textContent=st.source.toUpperCase();body.append(strong,small);
+    const chevron=document.createElement('span');chevron.textContent='›';btn.append(body,chevron);
+    btn.onclick=()=>showStationBoard(st);list.append(btn);
+  }
+  if(!matches.length)list.textContent=t('station.noMatch');
+}
+function italySeconds(){
+  const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Rome',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date());
+  const o=Object.fromEntries(parts.map(x=>[x.type,x.value]));return Number(o.hour)*3600+Number(o.minute)*60+Number(o.second);
+}
+function showStationBoard(st){
+  state.stationChoice=st;$('stationResults').hidden=true;$('stationBoard').hidden=false;
+  document.dispatchEvent(new CustomEvent('sr75:station-selected',{detail:{stopId:st.stopId,name:st.name}}));
+  const scroller=$('stationSheet').querySelector('.sheet-scroll');if(scroller)scroller.scrollTop=0;
+  $('stationName').textContent=t('station.boardTitle')+st.name;
+  const list=$('stationDepartures');list.replaceChildren();
+  const details=state.details[st.source],db=state.indexes[st.source];
+  const now=italySeconds(), departures=[];
+  const normStopId=normalizeStopId(st.stopId);
+  for(const [tripId,rows] of Object.entries(details?.times||{})){
+    const trip=db?.trips?.[tripId];if(!trip||trip[5]===false)continue;
+    for(const [sid,arr,dep] of rows){if(sid!==st.stopId)continue;
+      const sec=dep??arr;
+      if(sec===null||sec===undefined||sec<now-300)continue;
+      const route=db.routes?.[trip[0]];
+      const name=st.source==='trains'?txt(trip[3])||'Zug':txt(route?.[0])||'Bus';
+      departures.push({tripId,sec,name,headsign:trip[1]||t('detail.label.unknownTarget')});
+    }
+  }
+  departures.sort((a,b)=>a.sec-b.sec);
+  for(const d of departures.slice(0,28)){
+    const btn=document.createElement('button');btn.className='station-result';
+    const body=document.createElement('div'),title=document.createElement('strong'),sub=document.createElement('small'),clock=document.createElement('span');
+    const upd=state.updates.get(st.source+':'+d.tripId);
+    const live=isLiveUpdate(upd)&&state.statuses[st.source+'_updates']==='ok';
+    const delay=live?departureDelay(upd,st.stopId):null;
+    // Plattform/Gleis aus GTFS-RT auslesen
+    let platform=null;
+    if(upd&&Array.isArray(upd.stops)){
+      const row=upd.stops.find(s=>normalizeStopId(s.stopId??s.stop_id)===normStopId);
+      if(row){
+        platform=row.departure?.platform??row.arrival?.platform??row.departure?.platform_code??row.arrival?.platform_code;
+      }
+    }
+    title.textContent=d.name+' · '+d.headsign;
+    const liveStr=t('board.live');
+    const depText=delay===null?(live?t('board.liveNoDelay'):t('board.planned')):(delay>0?liveStr+' · +'+Math.round(delay/60)+' '+t('misc.minutes'):liveStr+' · '+Math.round(delay/60)+' '+t('board.earlier'))+' · '+st.source.toUpperCase();
+    sub.textContent=depText;
+    if(platform){
+      const chip=document.createElement('span');
+      chip.className='platform-chip'+(live?' live':' plan');
+      chip.textContent=platform;
+      sub.appendChild(document.createTextNode(' · '));
+      sub.appendChild(chip);
+    }
+    sub.classList.toggle('sr-dep-live',live);
+    sub.classList.toggle('dep-delay-severe',live&&delay>=900);
+    sub.classList.toggle('dep-delay-warn',live&&delay>=120&&delay<900);
+    clock.textContent=formatClock(d.sec);
+    body.append(title,sub);btn.append(body,clock);list.append(btn);
+  }
+  if(!departures.length)list.textContent=t('board.noDepartures');
+  if(state.map&&Number.isFinite(st.lat)&&Number.isFinite(st.lon))state.map.panTo([st.lat,st.lon]);
+  document.dispatchEvent(new CustomEvent('sr37:station-board',{detail:{source:st.source,stopId:st.stopId}}));
+}
+
+function refreshScheduleMatches(){
+  const panel=$('scheduleMatches');panel.replaceChildren();panel.hidden=true;
+  const q=state.query.trim();
+  if(!q || q.length<2 || state.filter==='buses' || !indexReady('trains'))return;
+  if([...state.vehicles.values()].some(v=>visible(v)))return; // found a live marker
+  const digits=q.replace(/^(reg|r|rv|re|ec|ic|rj|rjx|zug)\s*/i,'').trim();
+  if(!/^\d{2,6}$/.test(digits))return;
+  const db=state.indexes.trains;
+  const entries=Object.entries(db.trips||{}).filter(([id,t])=>t[5]!==false && txt(t[3])===digits).slice(0,12);
+  if(!entries.length)return;
+  const title=document.createElement('h3');title.textContent=t('journey.noPosition');panel.append(title);
+  for(const [tripId,trip] of entries){
+    const btn=document.createElement('button');const left=document.createElement('div');
+    const strong=document.createElement('strong');strong.textContent=t('journey.train')+digits;
+    const small=document.createElement('small');small.textContent=trip[1]||t('journey.noDestination');
+    const icon=document.createElement('span');icon.textContent='→';left.append(strong,small);btn.append(left,icon);
+    btn.onclick=()=>selectScheduledTrain(tripId);panel.append(btn);
+  }
+  panel.hidden=false;
+}
+async function selectScheduledTrain(tripId){
+  const trip=state.indexes.trains?.trips?.[tripId];if(!trip)return;
+  $('scheduleMatches').hidden=true;state.selectedKey=null;
+  openSheet('vehicle');
+  $('sheetKind').textContent=t('journey.noPositionTitle');
+  $('sheetTitle').textContent='🚆 '+gtfsNumber('',trip[3]);
+  $('sheetSub').textContent=trip[1]||t('journey.noDestination2');
+  $('sheetBadges').replaceChildren(badge(t('board.noGtfsPlan'),'warn'));
+  $('modelCard').hidden=true;$('details').replaceChildren();
+  detail(t('detail.label.tripId'),tripId);detail(t('detail.label.position'),t('board.positionNotFound'));
+  detail(t('detail.label.trainNumber'),gtfsNumber('',trip[3]));detail(t('detail.label.delay'),t('board.delayNotChecked'));
+  $('sheetNote').textContent=t('journey.noPositionNote');
+  $('scheduleSection').hidden=true;$('emptySchedule').hidden=false;$('emptySchedule').textContent=t('journey.loadingStops');
+  const details=await loadDetails('trains');
+  if(state.activeSheet==='vehicle'&&state.selectedKey===null){
+    if(details)renderStops({source:'trains',tripId},details);
+    else $('emptySchedule').textContent=t('journey.noSchedule');
+  }
+}
+// Safari: keep swipes inside the detail panel, without blocking real scrolling.
+function setupSheetTouchGuards(){
+  for(const sheet of document.querySelectorAll('.sheet')){
+    const scroller=sheet.querySelector('.sheet-scroll');
+    if(!scroller)continue;
+    let touchY=null;
+    scroller.addEventListener('touchstart',event=>{
+      if(event.touches.length===1)touchY=event.touches[0].clientY;
+      else touchY=null;
+    },{passive:true});
+    scroller.addEventListener('touchmove',event=>{
+      if(touchY===null || event.touches.length!==1 || !event.cancelable)return;
+      const y=event.touches[0].clientY;
+      const delta=y-touchY;
+      const atTop=scroller.scrollTop<=0;
+      const atBottom=scroller.scrollTop+scroller.clientHeight>=scroller.scrollHeight-1;
+      if((atTop&&delta>0)||(atBottom&&delta<0))event.preventDefault();
+      touchY=y;
+    },{passive:false});
+    scroller.addEventListener('touchend',()=>{touchY=null},{passive:true});
+    scroller.addEventListener('touchcancel',()=>{touchY=null},{passive:true});
+  }
+}
+function offlineState(online=navigator.onLine!==false){
+  const banner=$('offlineBanner');
+  if(banner)banner.hidden=online;
+  document.body.classList.toggle('sr-offline',!online);
+  return !online;
+}
+function firstSearchHit(){
+  const q=state.query.trim().toLocaleLowerCase('de');
+  if(!q)return null;
+  for(const v of state.vehicles.values()){
+    if(!visible(v))continue;
+    const hay=`${v.name} ${v.headsign} ${v.vehicleId} ${v.tripId} ${v.routeLongName}`.toLocaleLowerCase('de');
+    if(hay.includes(q))return v;
+  }
+  return null;
+}
+function jumpToFirstHit(){
+  const v=firstSearchHit();
+  if(!v)return false;
+  selectVehicle(v.key);
+  const marker=state.markers.get(v.key)?.marker;
+  const p=marker?.getLatLng();
+  if(p&&state.map)state.map.setView([p.lat,p.lng],Math.max(state.map.getZoom(),14),{animate:true});
+  return true;
+}
+function renderSearchResults(){
+  const list=$('searchResults');
+  const q=state.query.trim().toLocaleLowerCase('de');
+  list.replaceChildren();
+  if(!q||q.length<2){list.hidden=true;return;}
+  const hits=[];
+  for(const v of state.vehicles.values()){
+    if(!visible(v))continue;
+    const hay=`${v.name} ${v.headsign} ${v.vehicleId} ${v.tripId} ${v.routeLongName}`.toLocaleLowerCase('de');
+    if(hay.includes(q))hits.push(v);
+  }
+  if(!hits.length){
+    list.hidden=false;
+    const empty=document.createElement('div');
+    empty.className='search-hit';
+    empty.style.cursor='default';
+    empty.style.opacity='.6';
+    empty.innerHTML='<span style="color:var(--radar84-muted)">Keine Fahrzeuge gefunden</span>';
+    list.append(empty);
+    return;
+  }
+  for(const v of hits.slice(0,10)){
+    const btn=document.createElement('button');btn.className='search-hit';
+    const left=document.createElement('div');
+    const strong=document.createElement('strong');strong.textContent=v.name;left.append(strong);
+    const small=document.createElement('small');small.textContent=v.headsign||t('detail.trainLineUnverified');left.append(small);
+    const kind=document.createElement('span');kind.className='kind';kind.textContent=v.kind==='train'?t('search.train'):t('search.bus');btn.append(left,kind);
+    btn.onclick=()=>{selectVehicle(v.key);list.hidden=true;};
+    list.append(btn);
+  }
+  list.hidden=false;
+}
+function applyTranslations(){
+  document.querySelectorAll('[data-t]').forEach(el=>{
+    const key=el.getAttribute('data-t');
+    if(key)el.textContent=t(key);
+  });
+  // Platzhalter-Attribute
+  document.querySelectorAll('[data-t-placeholder]').forEach(el=>{
+    const key=el.getAttribute('data-t-placeholder');
+    if(key)el.placeholder=t(key);
+  });
+  document.querySelectorAll('[data-t-title]').forEach(el=>{
+    const key=el.getAttribute('data-t-title');
+    if(key)el.title=t(key);
+  });
+  document.querySelectorAll('[data-t-aria-label]').forEach(el=>{
+    const key=el.getAttribute('data-t-aria-label');
+    if(key)el.setAttribute('aria-label',t(key));
+  });
+}
+function setupControls(){
+  setupSheetTouchGuards();
+  offlineState();
+  window.addEventListener('offline',()=>offlineState(false));
+  window.addEventListener('online',()=>offlineState(true));
+  for(const b of document.querySelectorAll('[data-filter]'))b.addEventListener('click',()=>setFilter(b.dataset.filter));
+  let debounce=0;
+  $('search').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();jumpToFirstHit()}});
+  $('search').oninput=e=>{clearTimeout(debounce);debounce=setTimeout(()=>{state.query=e.target.value.toLocaleLowerCase('de').trim();refreshMarkers();refreshScheduleMatches();updateViewportBadge();renderSearchResults()},130)};
+  $('statusBtn').onclick=()=>{
+    const fav=[...state.favorites].filter(k=>state.vehicles.has(k));
+    if(fav.length){selectVehicle(fav[0]);return;}
+    showSourceStatus();
+  };
+  $('healthBtn').onclick=()=>{
+    const panel=$('healthPanel');
+    const hidden=panel.hidden;
+    closeSheets();$('searchResults')?.classList.add('hidden');
+    panel.hidden=!hidden;
+    if(!hidden)updateHealthPanel();
+  };
+  $('closeHealth').onclick=()=>$('healthPanel').hidden=true;
+  $('favBtnTop').onclick=()=>{
+    const panel=$('favPanel');
+    const hidden=panel.hidden;
+    closeSheets();$('searchResults')?.classList.add('hidden');if($('healthPanel'))$('healthPanel').hidden=true;
+    panel.hidden=!hidden;
+    if(!hidden)updateFavPanel();
+  };
+  $('closeFav').onclick=()=>$('favPanel').hidden=true;
+  $('langBtn').onclick=()=>{
+    const next=getLocale()==='de'?'it':'de';
+    setLocale(next);
+    $('langText').textContent=next.toUpperCase();
+    applyTranslations();
+    updateHealthPanel();
+    updateFavPanel();
+    statusLabel();
+    refreshMarkers();
+  };
+  $('linesBtn').onclick=()=>{
+    const panel=$('linesPanel');
+    const hidden=panel.hidden;
+    closeSheets();$('searchResults')?.classList.add('hidden');if($('healthPanel'))$('healthPanel').hidden=true;if($('favPanel'))$('favPanel').hidden=true;
+    panel.hidden=!hidden;
+    if(!hidden)renderLinesPanel();
+  };
+  $('closeLines').onclick=()=>$('linesPanel').hidden=true;
+  $('linesSearch').oninput=renderLinesPanel;
+  document.querySelectorAll('.lines-filters .chip').forEach(b=>b.onclick=()=>{
+    document.querySelectorAll('.lines-filters .chip').forEach(c=>c.classList.remove('active'));
+    b.classList.add('active');
+    renderLinesPanel();
+  });
+  $('refreshBtnFromBanner').onclick=()=>refreshFeeds();
+  $('tileBtn').onclick=()=>switchTileProvider(1-tileProviderIndex,'Benutzerwahl');
+  document.addEventListener('click',e=>{
+    if(!e.target.closest('#search')&&!e.target.closest('#searchResults'))$('searchResults')?.classList.add('hidden');
+    if($('healthPanel')&&!$('healthPanel').hidden)$('healthPanel').hidden=true;
+    if($('favPanel')&&!$('favPanel').hidden)$('favPanel').hidden=true;
+  });
+  $('refreshBtn').onclick=()=>{
+    if(Date.now()-state.fetchedAt>=manualRefreshDelayMs)refreshFeeds();
+    // Recheck the viewport; only switch tile providers on user action or failures.
+    if(tileErrorCount>0 && state.tiles && typeof state.tiles.redraw==='function'){
+      state.tiles.redraw();
+    }
+    if(state.map && typeof state.map.invalidateSize==='function')state.map.invalidateSize({pan:false});
+    updateViewportBadge();
+  };
+  $('themeToggle').onclick=()=>changeTheme(document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark');
+  $('noticeClose').onclick=()=> $('notice').hidden=true;
+  $('closeSheet').onclick=()=>closeSheets();$('closeStations').onclick=()=>closeSheets();$('scrim').onclick=()=>closeSheets();
+  $('fitBtn').onclick=fitMap;$('stationBtn').onclick=showStations;
+  $('viewportBadge').onclick=fitMap;
+  $('areaBtn').onclick=()=>{ $('areaPicker').hidden=!$('areaPicker').hidden; };
+  for(const btn of document.querySelectorAll('[data-place]'))btn.onclick=()=>moveToPlace(btn.dataset.place);
+  $('stationSearch').oninput=renderStationResults;$('backStations').onclick=()=>{$('stationBoard').hidden=true;$('stationResults').hidden=false};
+  document.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){closeSheets();$('healthPanel').hidden=true;$('favPanel').hidden=true;}
+    // Tastatur-Shortcuts (nur außerhalb von Eingabefeldern):
+    if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;
+    if(e.key==='r'||e.key==='R'){e.preventDefault();refreshFeeds();}
+    if(e.key==='f'||e.key==='F'){e.preventDefault();fitMap();}
+    if(e.key==='s'||e.key==='S'){e.preventDefault();showStations();}
+    if(e.key==='?'){e.preventDefault();showSourceStatus();}
+  });
+  // Hinweis auf Tastatur-Shortcuts (einmalig beim Start)
+  if(!localStorage.getItem('sr-shortcuts-hint')){
+    const hint=document.createElement('div');
+    hint.className='shortcut-hint';
+    hint.textContent=t('shortcuts.hint');
+    hint.style.cssText='position:fixed;bottom:10px;right:10px;padding:6px 10px;border-radius:8px;background:rgba(10,18,30,.85);color:#f3f7fc;font-size:11px;z-index:900;cursor:pointer';
+    hint.onclick=()=>{hint.remove();localStorage.setItem('sr-shortcuts-hint','1');};
+    document.body.append(hint);
+    setTimeout(()=>hint.remove(),6000);
+  }
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden){for(const [key,job] of state.jobs){const e=state.markers.get(key);if(e)e.marker.setLatLng([job.to.lat,job.to.lon]);}state.jobs.clear();state.busTracks.clear();}
+    else { if(Date.now()-state.fetchedAt>30000)refreshFeeds();if(state.map)state.map.invalidateSize({pan:false}); }
+  });
+}
+function currentVehicleDelay(v){
+  if(!v?.tripId || state.statuses[v.source+'_updates']!=='ok')return null;
+  const update=state.updates.get(v.source+':'+v.tripId);
+  if(!update || (v.tripStartDate && update.tripStartDate && v.tripStartDate!==update.tripStartDate) || Date.now()-update.fetchedAt>DETAIL_MAX_AGE)return null;
+  return vehicleDelayInfo(update,v);
+}
+// Limited local bridge for the optional 3.7 interface. It does not change the GTFS source.
+window.SuedtirolRadar37={state,showStations,showStationBoard,getStationList,openStationFromMap,setFilter,refreshMarkers,refreshScheduleMatches,
+  verifiedRouteCount:()=>[...state.vehicles.values()].filter(v=>v.kind==='bus' && v.tripId && v.shapeId && mapTarget(v).path).length,
+  routeOnlyCount:()=>[...state.vehicles.values()].filter(v=>v.kind==='bus' && !v.shapeId && v.routeShapeId && mapTarget(v).path).length,
+  routeMatchFor:v=>mapTarget(v),vehicleDelay:currentVehicleDelay,qualityFor:v=>observationQuality(v),fusionInfo:()=>state.fusion,diagnostics:()=>state.diagnostics||feedDiagnostics(state.vehicles.values(),state.statuses)};
+async function init(){
+  bootPhase('start');
+  try{changeTheme(localStorage.getItem('sr-theme')==='light'?'light':'dark')}catch{changeTheme('dark')}
+  loadFavorites();
+  loadLineFavorites();
+  loadJourneyFavorites();
+  loadStationFavorites();
+  loadDismissedAlerts();
+  initLocale();
+  applyTranslations();
+  setupControls();
+  if(!initMap()){bootPhase('map-error');return}
+  bootPhase('map-ready');
+  document.dispatchEvent(new Event('sr37:ready'));
+  // These asynchronous jobs are deliberately independent. No fabricated
+  // realtime positions: refreshFeeds still uses only actual source payloads.
+  const feeds=refreshFeeds().catch(error=>console.error('Initial realtime fetch failed',error));
+  const indexes=loadIndexes().catch(error=>console.warn('Timetable loading failed',error));
+  const rail=loadRailShapes().catch(error=>console.info('Rail geometry unavailable',error));
+  const buses=loadBusShapeManifests().catch(error=>console.info('Bus shapes unavailable',error));
+  bootPhase('loading-data');
+  await feeds;
+  bootPhase('feeds-checked');
+  setInterval(()=>{if(!document.hidden)refreshFeeds()},AVERAGE_POLL_MS);
+  bootPhase('ready');
+  // 9.7: Neue Version verfügbar melden und zum Neu-Laden einladen.
+  function updateToast(){
+    const el=document.getElementById('sr-update-toast');
+    if(el)return el;
+    const t=document.createElement('div');
+    t.id='sr-update-toast';
+    t.className='sr-update-toast';
+    t.innerHTML='<b>Neue Version verfügbar.</b> Zum Aktualisieren Seite neu laden.<button id="sr-update-reload">Jetzt laden</button>';
+    document.body.append(t);
+    t.querySelector('#sr-update-reload').addEventListener('click',()=>{
+      navigator.serviceWorker.getRegistration().then(reg=>{
+        if(reg&&reg.waiting)reg.waiting.postMessage({type:'SKIP_WAITING'});
+        location.reload();
+      });
+    });
+    return t;
+  }
+  // 9.4: Die App-Huelle wird offline faehig. Live-Daten bleiben unberuehrt.
+  // Die Versionsangabe im Pfad sorgt dafuer, dass nach einem Release ein
+  // neuer Worker geholt wird - auch wenn der Browser den alten lange cached.
+  // Der Scope muss ausdruecklich auf '/' stehen, sonst waere er '/sw.js'.
+  if('serviceWorker' in navigator){
+   try{
+    navigator.serviceWorker.register('/sw.js?v=9.9.0',{scope:'/'}).then(reg=>{
+     reg.addEventListener('updatefound',()=>{
+      const w=reg.installing;
+      if(!w)return;
+      w.addEventListener('statechange',()=>{
+       if(w.state==='installed'&&navigator.serviceWorker.controller){
+        const u=updateToast();u.hidden=false;
+       }
+      });
+     });
+    }).catch(()=>{});
+   }catch{}
+  }
+  Promise.allSettled([indexes,rail,buses]).then(()=>{refreshMarkers();updateViewportBadge();});
+  // Refresh labels/route associations after GTFS indexes become available.
+  // Any valid reported position remains derived only from official feeds.
+  if(!document.hidden)refreshFeeds().catch(error=>console.info('Post-index refresh unavailable',error));
+  loadBusShapesForVehicles().catch(e=>console.info('Bus shape import pending',e));
+}
+init().catch(e=>{
+  bootPhase('startup-error');
+  console.error('Startup error',e);
+  const status=$('statusText');if(status)status.textContent=t('status.startupError');
+  setNotice('<strong>Fehler beim Start.</strong> Bitte Diagnose im Hinweisfeld prüfen.');
+});

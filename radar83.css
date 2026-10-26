@@ -1,0 +1,142 @@
+/* Radar 8.3 — real 3D map only during selected vehicle cinematic view.
+   Farben aus dem zentralen Designsystem in styles.css. */
+
+/* === Viewport === */
+#map .sr83-viewport{
+  position:absolute;inset:0;z-index:835;overflow:hidden;
+  background:var(--color-bg);
+  opacity:0;pointer-events:none;
+  transition:opacity .24s ease;
+}
+#map .sr83-viewport.sr83-ready,
+#map .sr83-viewport.sr83-loading{opacity:1;pointer-events:auto}
+#map .sr83-map,#map .sr83-map .maplibregl-map{
+  position:absolute;inset:0;width:100%;height:100%
+}
+#map .sr83-map .maplibregl-canvas-container,
+#map .sr83-map .maplibregl-canvas{touch-action:none}
+
+/* === Toolbar === */
+#map .sr83-toolbar{
+  position:absolute;z-index:10;left:12px;right:12px;
+  top:max(128px,env(safe-area-inset-top,0px));
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  pointer-events:none
+}
+#map .sr83-label{
+  color:var(--color-text);letter-spacing:.12em;font-size:9px;font-weight:750;
+  padding:9px 11px;border-radius:var(--radius-sm);
+  background:rgba(16,28,41,.9);
+  border:1px solid var(--color-edge-strong);
+  box-shadow:0 5px 16px rgba(0,0,0,.45);
+  white-space:nowrap
+}
+
+/* === Buttons === */
+#map .sr83-back{
+  pointer-events:auto;touch-action:manipulation;appearance:none;
+  min-height:var(--touch);padding:9px 12px;
+  border-radius:var(--radius-sm);
+  border:1px solid var(--color-edge-strong);
+  background:rgba(17,34,52,.92);color:var(--color-text);
+  box-shadow:0 4px 16px rgba(0,0,0,.45);
+  font:600 12px/1.1 Inter,-apple-system,BlinkMacSystemFont,sans-serif;
+  -webkit-tap-highlight-color:transparent
+}
+#map .sr83-back:active{background:var(--color-surface-3)}
+#map .sr83-back:focus-visible{
+  outline:2px solid var(--color-focus);outline-offset:2px
+}
+#map .sr83-replay{
+  pointer-events:auto;touch-action:manipulation;appearance:none;
+  min-height:38px;white-space:nowrap;padding:8px 10px;
+  border-radius:9px;border:1px solid var(--color-edge-strong);
+  background:rgba(22,44,65,.92);color:var(--color-text);
+  font:600 11px Inter,system-ui,sans-serif
+}
+
+/* === Credit === */
+#map .sr83-credit{
+  position:absolute;z-index:10;left:50%;
+  bottom:calc(30dvh + 16px);
+  max-width:calc(100% - 28px);
+  transform:translateX(-50%);
+  text-align:center;
+  border-radius:9px;padding:6px 9px;
+  background:rgba(11,23,34,.92);
+  border:1px solid var(--color-edge-strong);
+  color:var(--color-text-muted);font-size:9px;font-weight:500;
+  pointer-events:none
+}
+
+/* === Maplibre controls === */
+#map .sr83-viewport .maplibregl-ctrl-bottom-right{
+  bottom:min(30dvh,230px)
+}
+#map .sr83-viewport .maplibregl-ctrl-attrib{
+  font-size:8px;max-width:43vw
+}
+#map .sr83-viewport .maplibregl-ctrl-attrib{
+  background:rgba(12,27,43,.92)!important;
+  color:var(--color-text-muted)!important;
+  border:1px solid var(--color-edge-strong)!important;
+  border-radius:9px!important;padding:4px 7px!important
+}
+#map .sr83-viewport .maplibregl-ctrl-attrib a{
+  color:var(--color-train)!important
+}
+
+/* === Cinematic view overrides === */
+body.sr83-cinematic #map .sr71-cinematic{opacity:0!important}
+body.sr83-cinematic #map .sr82-model-canvas{display:none!important}
+body.sr83-cinematic .map-actions,
+body.sr83-cinematic #sr60Launch,
+body.sr83-cinematic .sr40-launch{
+  opacity:0!important;pointer-events:none!important
+}
+body.sr83-cinematic #sheet.sr42-sheet[data-sr42-snap="peek"].open{
+  max-height:30dvh
+}
+
+@media(max-width:390px){
+  #map .sr83-toolbar{
+    top:max(122px,env(safe-area-inset-top,0px))
+  }
+  #map .sr83-label{font-size:8px}
+  #map .sr83-credit{font-size:8px}
+}
+
+/* === iPhone compact === */
+#map .sr83-toolbar{
+  gap:5px;right:10px;left:10px;
+  top:max(118px,env(safe-area-inset-top,0px))
+}
+#map .sr83-label{
+  white-space:nowrap;flex:1 1 auto;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;
+  font-size:9px;padding:8px 10px
+}
+#map .sr83-replay{
+  min-height:38px;padding:8px 10px;font-size:11px
+}
+#map .sr83-viewport .maplibregl-ctrl-attrib{
+  font-size:8px;max-width:42vw;line-height:1.2
+}
+#map .sr83-viewport .maplibregl-ctrl-bottom-right{right:7px}
+
+@media (max-width: 430px){
+  #map .sr83-toolbar{
+    left:7px;right:7px;top:max(112px,env(safe-area-inset-top,0px));gap:5px
+  }
+  #map .sr83-label{
+    font-size:8px;padding:7px 9px;letter-spacing:.09em
+  }
+  #map .sr83-replay,#map .sr83-back{min-height:44px;padding:9px 11px;font-size:11px}
+  #map .sr83-credit{
+    bottom:calc(28dvh + 12px);font-size:8px;padding:5px 8px
+  }
+}
+
+@media(prefers-reduced-motion:reduce){
+  #map .sr83-viewport{transition:none!important}
+}
